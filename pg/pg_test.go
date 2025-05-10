@@ -31,6 +31,10 @@ type Dept struct {
 	Description string
 	DisposeOn   *time.Time
 	Director    string `db:"text(50);default('admin')"`
+	Code        string `db:"text(50);unique:dept_code_idx"`
+	Col1        string `db:"text(50);unique:dept_code_idx"`
+	Col2        string `db:"text(50);unique:dept_code_idx"`
+	Col3        string `db:"text(50);unique:dept_code_idx"`
 }
 
 func TestConnect(t *testing.T) {
@@ -106,7 +110,7 @@ func TestExecSQlCommand(t *testing.T) {
 		t.Error(err)
 	}
 	info, err := utils.GetTableInfoByType(
-		"postgres", reflect.TypeOf(Emp{}), func(col *utils.ColInfo) error {
+		"postgres", reflect.TypeOf(Dept{}), func(col *utils.ColInfo) error {
 			dbMapType := utils.GoTypeToPOSTGRESType
 			// get the type of the field
 			fieldType := col.Typ
@@ -135,5 +139,7 @@ func TestExecSQlCommand(t *testing.T) {
 		t.Error(err)
 	}
 	t.Log(idx)
+	idx2 := utils.GetAllIndexInColsInfo(info.Columns)
+	t.Log(idx2)
 
 }

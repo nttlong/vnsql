@@ -71,7 +71,7 @@ func GetTableInfo(dbType string, entity interface{}, onResolveCol func(col *ColI
 var dbTypeTagKeWords = map[string][]string{
 	"df":  {"default", "default_value"},
 	"pk":  {"primary_key", "primarykey", "primary_key_index", "primarykey_index", "pk_index", "pkindex", "primary_key_idx", "primarykey_idx", "pkidx"},
-	"uk":  {"unique_index", "uniquekey", "unique_key", "uniquekey_index", "unique_key_index", "uk_index", "ukindex", "unique_key_idx", "uniquekey_idx", "ukidx"},
+	"uk":  {"unique", "unique_index", "uniquekey", "unique_key", "uniquekey_index", "unique_key_index", "uk_index", "ukindex", "unique_key_idx", "uniquekey_idx", "ukidx"},
 	"idx": {"index", "key", "key_index", "keyindex", "idx_index", "idxindex", "key_idx", "keyidx", "idxidx"},
 }
 
@@ -152,6 +152,15 @@ func getTableInfoByType(dbType string, typ reflect.Type, onResolveCol func(col *
 				indexName = strings.Split(indexName, ";")[0]
 			} else {
 				indexName = field.Name + "_idx"
+			}
+
+		}
+		if isUnique {
+			if strings.Contains(tags, ";uk:") {
+				indexName = strings.Split(tags, ";uk:")[1]
+				indexName = strings.Split(indexName, ";")[0]
+			} else {
+				indexName = field.Name + "_uk"
 			}
 
 		}
@@ -266,4 +275,42 @@ func SortColumns(cols map[string]ColInfo) []ColInfo {
 		return ret[i].Order < ret[j].Order
 	})
 	return ret
+}
+func GetAllIndexInColsInfo(colsInfo []ColInfo) map[string][]ColInfo {
+	var indexMap = make(map[string][]ColInfo)
+	for _, colInfo := range colsInfo {
+		if colInfo.IsPk {
+			if _, ok := indexMap[colInfo.IndexName]; !ok {
+				indexMap[colInfo.IndexName] = []ColInfo{colInfo}
+				continue
+			} else {
+				indexMap[colInfo.IndexName] = append(indexMap[colInfo.IndexName], colInfo)
+				continue
+			}
+
+		}
+		if colInfo.IsUnique {
+			if _, ok := indexMap[colInfo.IndexName]; !ok {
+				indexMap[colInfo.IndexName] = []ColInfo{colInfo}
+				continue
+			} else {
+				indexMap[colInfo.IndexName] = append(indexMap[colInfo.IndexName], colInfo)
+				continue
+
+			}
+
+		}
+		if colInfo.IndexName != "" {
+			if _, ok := indexMap[colInfo.IndexName]; !ok {
+				indexMap[colInfo.IndexName] = []ColInfo{colInfo}
+				continue
+			} else {
+				cols := indexMap[colInfo.IndexName]
+				indexMap[colInfo.IndexName] = append(cols, colInfo)
+				continue
+			}
+
+		}
+	}
+	return indexMap
 }
