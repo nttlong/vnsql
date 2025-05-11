@@ -28,6 +28,7 @@ func (c *Connector) PingDb() error {
 		return err
 	}
 	defer db.Close()
+	db.QueryContext()
 
 	err = db.QueryRow("SELECT 1").Err()
 	if err != nil {
