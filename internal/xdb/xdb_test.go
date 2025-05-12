@@ -155,7 +155,9 @@ func TestDoMigrate(t *testing.T) {
 }
 
 var testList []string = []string{
-	"select sum(amount),deptId from dept group by deptId->SELECT sum(\"amount\"), \"deptId\" FROM \"dept\" GROUP BY GROUP BY \"deptId\"",
+	"select sum(amount) min,max(amount) max,deptId from dept group by deptId having max<10000->SELECT sum(\"amount\") AS \"min\", max(\"amount\") AS \"max\", \"deptId\" FROM \"dept\" GROUP BY \"deptId\" HAVING WHERE \"max\" < 10000",
+	"select sum(amount) min,max(amount) max,deptId from dept group by deptId->SELECT sum(\"amount\") AS \"min\", max(\"amount\") AS \"max\", \"deptId\" FROM \"dept\" GROUP BY \"deptId\"",
+	"select sum(amount),deptId from dept group by deptId->SELECT sum(\"amount\"), \"deptId\" FROM \"dept\" GROUP BY \"deptId\"",
 	"select emp.id,dept.dept_id from emp left join dept on dept.id = emp.dept_id->SELECT \"emp\".\"id\", \"dept\".\"dept_id\" FROM \"emp\" left join \"dept\" ON \"dept\".\"id\" = \"emp\".\"dept_id\"",
 	"select emp.id,dept.dept_id from emp  join dept on dept.id = emp.dept_id->SELECT \"emp\".\"id\", \"dept\".\"dept_id\" FROM \"emp\" join \"dept\" ON \"dept\".\"id\" = \"emp\".\"dept_id\"",
 	"select ? id->SELECT v1 AS \"id\" FROM \"dual\"",

@@ -118,9 +118,9 @@ func (w *Walker) walkOnStatement(stmt sqlparser.Statement) (string, error) {
 
 }
 func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
-	// t := reflect.TypeOf(node)
+
 	if fx, ok := node.(*sqlparser.StarExpr); ok {
-		fmt.Println(fx)
+
 		if !fx.TableName.IsEmpty() {
 			n, err := w.Resolver(Node{Nt: TableName, V: fx.TableName.Name.String()})
 			if err != nil {
@@ -138,8 +138,6 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 		}
 
 		nAlias, err := w.Resolver(Node{Nt: Alias, V: fx.As.String()})
-
-		fmt.Println(reflect.TypeOf(fx.Expr))
 
 		if err != nil {
 			return "", err
@@ -299,10 +297,10 @@ func (w *Walker) walkOnGroupBy(stmt sqlparser.GroupBy) (string, error) {
 		}
 		ret = append(ret, s)
 	}
-	return "GROUP BY " + strings.Join(ret, ", "), nil
+	return strings.Join(ret, ", "), nil
 }
 func (w *Walker) walkOnWhere(stmt *sqlparser.Where) (string, error) {
-	fmt.Print(stmt)
+
 	if stmt.Expr != nil {
 		where, err := w.walkSQLNode(stmt.Expr)
 		if err != nil {
@@ -362,7 +360,7 @@ func (w *Walker) walkOnFuncExpr(expr *sqlparser.FuncExpr) (string, error) {
 	return n.V + "(" + strings.Join(params, ", ") + ")", nil
 }
 func (w *Walker) walkSQLParen(expr *sqlparser.ParenExpr) (string, error) {
-	fmt.Println(expr)
+
 	cExpr := expr.Expr
 	if fx, ok := cExpr.(*sqlparser.BinaryExpr); ok {
 		strExpr, err := w.walkOnBinaryExpr(fx)
@@ -416,6 +414,13 @@ func (w *Walker) walkOnSelect(stmt *sqlparser.Select) (string, error) {
 		}
 		ret = append(ret, "GROUP BY "+groupBy)
 
+	}
+	if stmt.Having != nil {
+		groupBy, err := w.walkSQLNode(stmt.Having)
+		if err != nil {
+			return "", err
+		}
+		ret = append(ret, "HAVING "+groupBy)
 	}
 	if stmt.Where != nil {
 		where, err := w.walkSQLNode(stmt.Where)
