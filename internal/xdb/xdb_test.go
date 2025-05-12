@@ -12,6 +12,7 @@ import (
 	_ "github.com/nttlong/vnsql/internal/xdb"
 	"github.com/nttlong/vnsql/internal/xdb/common"
 	"github.com/nttlong/vnsql/internal/xdb/isql"
+	"github.com/nttlong/vnsql/internal/xdb/parser"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -151,4 +152,53 @@ func TestDoMigrate(t *testing.T) {
 		PgSql.GetMigrate("test").DoMigrate(&User{})
 		fmt.Println(time.Now().Sub(start).Nanoseconds())
 	}
+}
+
+var testList []string = []string{
+	"select sum(amount),deptId from dept group by deptId->SELECT sum(\"amount\"), \"deptId\" FROM \"dept\" GROUP BY GROUP BY \"deptId\"",
+	"select emp.id,dept.dept_id from emp left join dept on dept.id = emp.dept_id->SELECT \"emp\".\"id\", \"dept\".\"dept_id\" FROM \"emp\" left join \"dept\" ON \"dept\".\"id\" = \"emp\".\"dept_id\"",
+	"select emp.id,dept.dept_id from emp  join dept on dept.id = emp.dept_id->SELECT \"emp\".\"id\", \"dept\".\"dept_id\" FROM \"emp\" join \"dept\" ON \"dept\".\"id\" = \"emp\".\"dept_id\"",
+	"select ? id->SELECT v1 AS \"id\" FROM \"dual\"",
+	"select * from user U,dept D->SELECT * FROM \"user\" AS \"U\", \"dept\" AS \"D\"",
+	"select * from user where id = ?->SELECT * FROM \"user\" WHERE WHERE \"id\" = v1",
+
+	"select * from user U->SELECT * FROM \"user\" AS \"U\"",
+	"select * from user->SELECT * FROM \"user\"",
+
+	"select concat(firdtName, ?, lastName) fullName->SELECT concat(\"firdtName\", v1, \"lastName\") AS \"fullName\" FROM \"dual\"",
+	"select len(code) +? as Lt->SELECT len(\"code\") + v1 AS \"Lt\" FROM \"dual\"",
+	"select (?+15*2) id->SELECT (v1 + 15 * 2) AS \"id\" FROM \"dual\"",
+
+	"select @p1 id->SELECT p1 AS \"id\" FROM \"dual\"",
+	"select abc.*->SELECT \"abc\".* FROM \"dual\"",
+
+	"select *->SELECT * FROM \"dual\"",
+
+	"select abc.*,cdf.*->SELECT \"abc\".*, \"cdf\".* FROM \"dual\"",
+}
+
+func TestParser(t *testing.T) {
+
+	w := parser.Walker{
+		Resolver: func(node parser.Node) (parser.Node, error) {
+			if node.Nt == parser.Function {
+				return node, nil
+			}
+			if node.Nt == parser.Field || node.Nt == parser.TableName || node.Nt == parser.Alias {
+				node.V = "\"" + node.V + "\""
+			}
+			return node, nil
+		},
+	}
+	for i, sql := range testList {
+		sqlR := strings.Split(sql, "->")[0]
+		sqlExpected := strings.Split(sql, "->")[1]
+		sqlP, err := w.Parse(sqlR)
+		assert.NoError(t, err)
+		assert.Equal(t, sqlExpected, sqlP)
+		if sqlP != sqlExpected {
+			fmt.Println(fmt.Sprintf("[%d] %s->%s", i, sqlR, sqlP))
+		}
+	}
+
 }
