@@ -14,6 +14,7 @@ import (
 	"github.com/nttlong/vnsql/internal/xdb/common"
 	"github.com/nttlong/vnsql/internal/xdb/isql"
 	"github.com/nttlong/vnsql/internal/xdb/parser"
+	pgParser "github.com/nttlong/vnsql/internal/xdb/parser/postgres"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -383,6 +384,66 @@ func TestDeleteParser(t *testing.T) {
 		sqlR := strings.Split(sql, "->")[0]
 		sqlExpected := strings.Split(sql, "->")[1]
 		sqlP, err := w.Parse(sqlR, nil)
+		assert.NoError(t, err)
+		assert.Equal(t, sqlExpected, sqlP)
+		if sqlP != sqlExpected {
+			fmt.Println(fmt.Sprintf("[%d] %s->%s", i, sqlR, sqlP))
+		}
+	}
+}
+
+var sqlSelectCaseWhen = []string{
+	"select case when a.c=1 then 'a' when a.c=2 then 'b' else 'c' end as name from A->SELECT CASE WHEN \"a\".\"c\" = 1 THEN a WHEN \"a\".\"c\" = 2 THEN b ELSE c END AS \"name\" FROM \"A\"",
+	"select case when id = ? then 'a' when id = ? then 'b' else ? end as name from A->SELECT CASE WHEN \"id\" = @p1 THEN a WHEN \"id\" = @p2 THEN b ELSE @p3 END AS \"name\" FROM \"A\"",
+	"select case when id = 1 then 'a' when id = 2 then 'b' else 'c' end as name from A->SELECT CASE WHEN \"id\" = 1 THEN a WHEN \"id\" = 2 THEN b ELSE c END AS \"name\" FROM \"A\"",
+	"select case when id = 1 then 'a' when id = 2 then 'b' else 'c' end as name from A where id = ?->SELECT CASE WHEN \"id\" = 1 THEN a WHEN \"id\" = 2 THEN b ELSE c END AS \"name\" FROM \"A\" WHERE \"id\" = @p1",
+}
+
+func TestSqlSelectCaseWhen(t *testing.T) {
+	w := parser.Walker{
+		Resolver: func(node parser.Node, tblMap *parser.TableMap) (parser.Node, error) {
+			if node.Nt == parser.Params {
+				node.V = strings.Replace(node.V, "v", "@p", -1)
+			}
+			if node.Nt == parser.Function {
+				return node, nil
+			}
+			if node.Nt == parser.Field || node.Nt == parser.TableName || node.Nt == parser.Alias {
+				node.V = "\"" + node.V + "\""
+			}
+			return node, nil
+		},
+	}
+	for i, sql := range sqlSelectCaseWhen {
+		sqlR := strings.Split(sql, "->")[0]
+		sqlExpected := strings.Split(sql, "->")[1]
+		sqlP, err := w.Parse(sqlR, nil)
+		assert.NoError(t, err)
+		assert.Equal(t, sqlExpected, sqlP)
+		if sqlP != sqlExpected {
+			fmt.Println(fmt.Sprintf("[%d] %s->%s", i, sqlR, sqlP))
+		}
+	}
+}
+
+var sqlPostgresParseTest = []string{
+	"select * from A where b=true->SELECT * FROM \"A\" WHERE \"b\" = TRUE",
+	"select len(a) la, now() as n from A->SELECT length(\"a\") AS la, current_timestamp() AS n FROM \"A\"",
+	"select * from A where d='2001-01-01'->SELECT * FROM \"A\" WHERE \"d\" = '2001-01-01'",
+	"select * from A where d='2001-01-01 12:00:00'->SELECT * FROM \"A\" WHERE \"d\" = '2001-01-01 12:00:00'",
+}
+
+func TestPostgresParse(t *testing.T) {
+	w := parser.Walker{
+		Resolver: pgParser.PostgresResoler,
+	}
+	for i, sql := range sqlPostgresParseTest {
+		sqlR := strings.Split(sql, "->")[0]
+		sqlExpected := strings.Split(sql, "->")[1]
+		sqlP, err := w.Parse(sqlR, nil)
+		if err != nil {
+			panic(err)
+		}
 		assert.NoError(t, err)
 		assert.Equal(t, sqlExpected, sqlP)
 		if sqlP != sqlExpected {

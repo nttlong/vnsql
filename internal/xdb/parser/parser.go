@@ -106,7 +106,12 @@ func (n *Node) IsDate(s string) (*time.Time, bool) {
 	}
 	return nil, false
 }
-
+func (n *Node) IsBool(s string) (bool, bool) {
+	if ret, err := strconv.ParseBool(s); err == nil {
+		return ret, true
+	}
+	return false, false
+}
 func (w *Walker) Parse(sql string, tblMap *TableMap) (string, error) {
 	stm, err := sqlparser.Parse(sql)
 	if err != nil {
@@ -416,9 +421,45 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode, tblMap *TableMap) (string, 
 		}
 		return strings.Join(ret, ", "), nil
 	}
+	if fx, ok := node.(*sqlparser.CaseExpr); ok {
+		return w.walkOnCaseExpr(fx, tblMap)
+	}
+	if fx, ok := node.(sqlparser.BoolVal); ok {
+		str := "true"
+		if !fx {
+			str = "false"
+		}
+		n, err := w.Resolver(Node{Nt: Value, V: str}, tblMap)
+		if err != nil {
+			return "", err
+		}
+		return n.V, nil
+	}
 
 	panic(fmt.Sprintf("unsupported type %s in parser.walkSQLNode", reflect.TypeOf(node)))
 
+}
+func (w *Walker) walkOnCaseExpr(expr *sqlparser.CaseExpr, tblMap *TableMap) (string, error) {
+	ret := []string{}
+	for _, when := range expr.Whens {
+		whenStr, err := w.walkSQLNode(when.Cond, tblMap)
+		if err != nil {
+			return "", err
+		}
+		thenStr, err := w.walkSQLNode(when.Val, tblMap)
+		if err != nil {
+			return "", err
+		}
+		ret = append(ret, "WHEN "+whenStr+" THEN "+thenStr)
+	}
+	if expr.Else != nil {
+		elseStr, err := w.walkSQLNode(expr.Else, tblMap)
+		if err != nil {
+			return "", err
+		}
+		ret = append(ret, "ELSE "+elseStr)
+	}
+	return "CASE " + strings.Join(ret, " ") + " END", nil
 }
 func (w *Walker) walkOnSubquery(stmt sqlparser.Subquery, tblMap *TableMap) (string, error) {
 	subquery, err := w.walkOnStatement(stmt.Select, tblMap)
