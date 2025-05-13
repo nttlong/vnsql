@@ -1,6 +1,7 @@
 package xdb_test
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -155,14 +156,18 @@ func TestDoMigrate(t *testing.T) {
 }
 
 var testList []string = []string{
-	"select sum(amount) min,max(amount) max,deptId from dept group by deptId having max<10000->SELECT sum(\"amount\") AS \"min\", max(\"amount\") AS \"max\", \"deptId\" FROM \"dept\" GROUP BY \"deptId\" HAVING WHERE \"max\" < 10000",
-	"select sum(amount) min,max(amount) max,deptId from dept group by deptId->SELECT sum(\"amount\") AS \"min\", max(\"amount\") AS \"max\", \"deptId\" FROM \"dept\" GROUP BY \"deptId\"",
+
+	"select * from A,B order by A.id,B.id asc->SELECT * FROM \"A\", \"B\" ORDER BY \"A\".\"id\" ASC, \"B\".\"id\" ASC",
+	"select * from user where id = ?  union select * from dept->SELECT * FROM \"user\" WHERE \"id\" = v1 union SELECT * FROM \"dept\"",
+	"select sum(amount),min(amount), max(amount) max,deptId from dept group by deptId having max<10000->SELECT sum(\"amount\"), min(\"amount\"), max(\"amount\") AS \"max\", \"deptId\" FROM \"dept\" GROUP BY \"deptId\" HAVING \"max\" < 10000",
+	"select sum(amount),min(amount), max(amount) max,deptId from dept group by deptId->SELECT sum(\"amount\"), min(\"amount\"), max(\"amount\") AS \"max\", \"deptId\" FROM \"dept\" GROUP BY \"deptId\"",
+	//"select sum(amount),min(amount), max(amount) max,deptId from dept group by deptId->SELECT sum(\"amount\") AS \"min\", max(\"amount\") AS \"max\", \"deptId\" FROM \"dept\" GROUP BY \"deptId\"",
 	"select sum(amount),deptId from dept group by deptId->SELECT sum(\"amount\"), \"deptId\" FROM \"dept\" GROUP BY \"deptId\"",
 	"select emp.id,dept.dept_id from emp left join dept on dept.id = emp.dept_id->SELECT \"emp\".\"id\", \"dept\".\"dept_id\" FROM \"emp\" left join \"dept\" ON \"dept\".\"id\" = \"emp\".\"dept_id\"",
 	"select emp.id,dept.dept_id from emp  join dept on dept.id = emp.dept_id->SELECT \"emp\".\"id\", \"dept\".\"dept_id\" FROM \"emp\" join \"dept\" ON \"dept\".\"id\" = \"emp\".\"dept_id\"",
 	"select ? id->SELECT v1 AS \"id\" FROM \"dual\"",
 	"select * from user U,dept D->SELECT * FROM \"user\" AS \"U\", \"dept\" AS \"D\"",
-	"select * from user where id = ?->SELECT * FROM \"user\" WHERE WHERE \"id\" = v1",
+	"select * from user where id = ?->SELECT * FROM \"user\" WHERE \"id\" = v1",
 
 	"select * from user U->SELECT * FROM \"user\" AS \"U\"",
 	"select * from user->SELECT * FROM \"user\"",
@@ -178,11 +183,20 @@ var testList []string = []string{
 
 	"select abc.*,cdf.*->SELECT \"abc\".*, \"cdf\".* FROM \"dual\"",
 }
+var testSubQuries = []string{
+	"select * from user where id = (select id from dept where dept_id = ?)->SELECT * FROM \"user\" WHERE \"id\" = (SELECT \"id\" FROM \"dept\" WHERE \"dept_id\" = v1)",
+	"select * from (select * from user where id = ?) A->SELECT * FROM (SELECT * FROM \"user\" WHERE \"id\" = v1) AS \"A\"",
+}
+var testlLikeSql = []string{
+	"select * from user where code not like ?->SELECT * FROM \"user\" WHERE \"code\" not like v1",
+	"select * from user where code like ?->SELECT * FROM \"user\" WHERE \"code\" like v1",
+	"select * from user where code like ? and id = ?->SELECT * FROM \"user\" WHERE \"code\" like v1 AND \"id\" = v2",
+}
 
 func TestParser(t *testing.T) {
 
 	w := parser.Walker{
-		Resolver: func(node parser.Node) (parser.Node, error) {
+		Resolver: func(node parser.Node, tblMap *parser.TableMap) (parser.Node, error) {
 			if node.Nt == parser.Function {
 				return node, nil
 			}
@@ -192,10 +206,11 @@ func TestParser(t *testing.T) {
 			return node, nil
 		},
 	}
-	for i, sql := range testList {
+	//testAll := append(testList, testSubQuries...)
+	for i, sql := range testlLikeSql {
 		sqlR := strings.Split(sql, "->")[0]
 		sqlExpected := strings.Split(sql, "->")[1]
-		sqlP, err := w.Parse(sqlR)
+		sqlP, err := w.Parse(sqlR, nil)
 		assert.NoError(t, err)
 		assert.Equal(t, sqlExpected, sqlP)
 		if sqlP != sqlExpected {
@@ -203,4 +218,175 @@ func TestParser(t *testing.T) {
 		}
 	}
 
+}
+
+var testInsertIntoQuery = []string{
+	"insert into A (a,b,c) select d,e,f from G->INSERT INTO \"A\" (\"a\", \"b\", \"c\") SELECT \"d\", \"e\", \"f\" FROM \"G\"",
+	"insert into user (id,code,created_on,updated_on,created_by,updated_by,description) values (?,?)->INSERT INTO \"user\" (\"id\", \"code\", \"created_on\", \"updated_on\", \"created_by\", \"updated_by\", \"description\") VALUES (v1, v2)",
+}
+
+func TestInsertIntoParser(t *testing.T) {
+	w := parser.Walker{
+		Resolver: func(node parser.Node, tblMap *parser.TableMap) (parser.Node, error) {
+			if node.Nt == parser.Function {
+				return node, nil
+			}
+			if node.Nt == parser.Field || node.Nt == parser.TableName || node.Nt == parser.Alias {
+				node.V = "\"" + node.V + "\""
+			}
+			return node, nil
+		},
+	}
+	for i, sql := range testInsertIntoQuery {
+		sqlR := strings.Split(sql, "->")[0]
+		sqlExpected := strings.Split(sql, "->")[1]
+		sqlP, err := w.Parse(sqlR, nil)
+		assert.NoError(t, err)
+		assert.Equal(t, sqlExpected, sqlP)
+		if sqlP != sqlExpected {
+			fmt.Println(fmt.Sprintf("[%d] %s->%s", i, sqlR, sqlP))
+		}
+	}
+}
+
+var testUpdateQuery = []string{
+	"update A set a = ?, b = ?, c = ? where d = ?->UPDATE \"A\" SET \"a\" = v1, \"b\" = v2, \"c\" = v3, WHERE WHERE \"d\" = v4",
+	"update user set code = (select code from dept where dept_id = ?), updated_on = ? where id = ?->UPDATE \"user\" SET \"code\" = (SELECT \"code\" FROM \"dept\" WHERE WHERE \"dept_id\" = v1), \"updated_on\" = v2, WHERE WHERE \"id\" = v3",
+}
+
+func TestUpdateParser(t *testing.T) {
+	w := parser.Walker{
+		Resolver: func(node parser.Node, tblMap *parser.TableMap) (parser.Node, error) {
+			if node.Nt == parser.Function {
+				return node, nil
+			}
+			if node.Nt == parser.Field || node.Nt == parser.TableName || node.Nt == parser.Alias {
+				node.V = "\"" + node.V + "\""
+			}
+			return node, nil
+		},
+	}
+	for i, sql := range testUpdateQuery {
+		sqlR := strings.Split(sql, "->")[0]
+		sqlExpected := strings.Split(sql, "->")[1]
+		sqlP, err := w.Parse(sqlR, nil)
+		assert.NoError(t, err)
+		assert.Equal(t, sqlExpected, sqlP)
+		if sqlP != sqlExpected {
+			fmt.Println(fmt.Sprintf("[%d] %s->%s", i, sqlR, sqlP))
+		}
+	}
+}
+
+var testSeletctTopAndLimit = []string{
+	"select  A.* from A order by id limit ?,?->SELECT \"A\".* FROM \"A\" ORDER BY \"id\" ASC LIMIT @p1,@p2",
+	"select  A.* from A order by id limit 50,?->SELECT \"A\".* FROM \"A\" ORDER BY \"id\" ASC LIMIT 50,@p1",
+	"select  A.* from A order by id limit 50,100->SELECT \"A\".* FROM \"A\" ORDER BY \"id\" ASC LIMIT 50,100",
+}
+
+func TestSelectTopAndLimitParser(t *testing.T) {
+	w := parser.Walker{
+		Resolver: func(node parser.Node, tblMap *parser.TableMap) (parser.Node, error) {
+			if node.Nt == parser.Params {
+				node.V = strings.Replace(node.V, "v", "@p", -1)
+			}
+			if node.Nt == parser.OffsetAndLimit {
+				if node.Offset != "" && node.Limit != "" {
+					node.V = "LIMIT " + node.Offset + "," + node.Limit
+					return node, nil
+				}
+				if node.Offset == "" && node.Limit != "" {
+					node.V = "LIMIT " + node.Limit
+					return node, nil
+				}
+				if node.Offset != "" && node.Limit == "" {
+					node.V = "LIMIT " + node.Offset
+					return node, nil
+				}
+				if node.Offset == "" && node.Limit == "" {
+
+					return node, errors.New("loi roi")
+				}
+			}
+			if node.Nt == parser.Function {
+				return node, nil
+			}
+			if node.Nt == parser.Field || node.Nt == parser.TableName || node.Nt == parser.Alias {
+				node.V = "\"" + node.V + "\""
+			}
+			return node, nil
+		},
+	}
+	for i, sql := range testSeletctTopAndLimit {
+		sqlR := strings.Split(sql, "->")[0]
+		sqlExpected := strings.Split(sql, "->")[1]
+		sqlP, err := w.Parse(sqlR, nil)
+		assert.NoError(t, err)
+		assert.Equal(t, sqlExpected, sqlP)
+		if sqlP != sqlExpected {
+			fmt.Println(fmt.Sprintf("[%d] %s->%s", i, sqlR, sqlP))
+		}
+	}
+}
+
+var TestDelete = []string{
+	"delete from A using B where A.id = B.id ->DELETE FROM \"A\" USING \"B\" WHERE \"A\".\"id\" = \"B\".\"id\"",
+	"select * from A where d='2001-01-01'->SELECT * FROM \"A\" WHERE \"d\" = '01-01-2001'",
+
+	"delete from A where id = ?->DELETE FROM  USING \"A\" WHERE \"id\" = @p1",
+	"delete from user where id = ? and code = ?->DELETE FROM  USING \"user\" WHERE \"id\" = @p1 AND \"code\" = @p2",
+}
+
+func TestDeleteParser(t *testing.T) {
+	w := parser.Walker{
+		Resolver: func(node parser.Node, tblMap *parser.TableMap) (parser.Node, error) {
+			if node.Nt == parser.Value {
+				if td, ok := node.IsDate(node.V); ok {
+					//dd-MM-yyyy
+					strT := td.Format("02-01-2006")
+					node.V = "'" + strT + "'"
+
+				}
+
+			}
+			if node.Nt == parser.Params {
+				node.V = strings.Replace(node.V, "v", "@p", -1)
+			}
+			if node.Nt == parser.OffsetAndLimit {
+				if node.Offset != "" && node.Limit != "" {
+					node.V = "LIMIT " + node.Offset + "," + node.Limit
+					return node, nil
+				}
+				if node.Offset == "" && node.Limit != "" {
+					node.V = "LIMIT " + node.Limit
+					return node, nil
+				}
+				if node.Offset != "" && node.Limit == "" {
+					node.V = "LIMIT " + node.Offset
+					return node, nil
+				}
+				if node.Offset == "" && node.Limit == "" {
+
+					return node, errors.New("loi roi")
+				}
+			}
+			if node.Nt == parser.Function {
+				return node, nil
+			}
+			if node.Nt == parser.Field || node.Nt == parser.TableName || node.Nt == parser.Alias {
+				node.V = "\"" + node.V + "\""
+			}
+			return node, nil
+		},
+	}
+	for i, sql := range TestDelete {
+		sqlR := strings.Split(sql, "->")[0]
+		sqlExpected := strings.Split(sql, "->")[1]
+		sqlP, err := w.Parse(sqlR, nil)
+		assert.NoError(t, err)
+		assert.Equal(t, sqlExpected, sqlP)
+		if sqlP != sqlExpected {
+			fmt.Println(fmt.Sprintf("[%d] %s->%s", i, sqlR, sqlP))
+		}
+	}
 }

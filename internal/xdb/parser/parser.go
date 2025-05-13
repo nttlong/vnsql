@@ -26,6 +26,8 @@ const (
 	Where
 	Join
 	TableName
+	OffsetAndLimit
+	Using
 )
 
 // Optional: Add a String() method for better readability
@@ -50,17 +52,27 @@ func (n NodeType) String() string {
 }
 
 // Node represents a SQL node (field, table, params, or function)
+type UsingNodeOnDelete struct {
+	TableName   string
+	Where       string
+	TargetTable string
+	ReNewSQL    string
+}
 type Node struct {
-	Nt NodeType
-	V  string // Value of the node
-	C  []Node // Children of the node
+	Nt     NodeType
+	V      string // Value of the node
+	C      []Node // Children of the node
+	Offset string
+	Limit  string
+	Un     *UsingNodeOnDelete
 }
 type SQLParseInfo struct {
 	SQL    string
 	Params []interface{}
 }
+type TableMap map[string]map[string]string
 type Walker struct {
-	Resolver func(node Node) (Node, error)
+	Resolver func(node Node, tblMap *TableMap) (Node, error)
 }
 
 var paramPrefix []string = []string{"@", ":"}
@@ -76,7 +88,7 @@ func isParam(s string) (string, bool) {
 	}
 	return "", false
 }
-func isNumber(s string) (interface{}, bool) {
+func (n *Node) IsNumber(s string) (interface{}, bool) {
 	if ret, err := strconv.ParseFloat(s, 64); err == nil {
 		return ret, true
 	}
@@ -85,7 +97,7 @@ func isNumber(s string) (interface{}, bool) {
 	}
 	return nil, false
 }
-func isDate(s string) (*time.Time, bool) {
+func (n *Node) IsDate(s string) (*time.Time, bool) {
 	if ret, err := time.Parse("2006-01-02", s); err == nil {
 		return &ret, true
 	}
@@ -95,34 +107,36 @@ func isDate(s string) (*time.Time, bool) {
 	return nil, false
 }
 
-func (w *Walker) Parse(sql string) (string, error) {
+func (w *Walker) Parse(sql string, tblMap *TableMap) (string, error) {
 	stm, err := sqlparser.Parse(sql)
 	if err != nil {
 		return "", err
 	}
-	return w.walkOnStatement(stm)
+	return w.walkOnStatement(stm, tblMap)
 }
-func (w *Walker) walkOnStatement(stmt sqlparser.Statement) (string, error) {
+func (w *Walker) walkOnStatement(stmt sqlparser.Statement, tblMap *TableMap) (string, error) {
 	switch stmt := stmt.(type) {
+	case *sqlparser.Union:
+		return w.walkOnUnion(stmt, tblMap)
 	case *sqlparser.Select:
-		return w.walkOnSelect(stmt)
+		return w.walkOnSelect(stmt, tblMap)
 	case *sqlparser.Insert:
-		return w.walkOnInsert(stmt)
+		return w.walkOnInsert(stmt, tblMap)
 	case *sqlparser.Update:
-		return w.walkOnUpdate(stmt)
+		return w.walkOnUpdate(stmt, tblMap)
 	case *sqlparser.Delete:
-		return w.walkOnDelete(stmt)
+		return w.walkOnDelete(stmt, tblMap)
 	default:
-		return "", nil
+		panic(fmt.Sprintf("unsupported statement type %T", stmt))
 	}
 
 }
-func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
+func (w *Walker) walkSQLNode(node sqlparser.SQLNode, tblMap *TableMap) (string, error) {
 
 	if fx, ok := node.(*sqlparser.StarExpr); ok {
 
 		if !fx.TableName.IsEmpty() {
-			n, err := w.Resolver(Node{Nt: TableName, V: fx.TableName.Name.String()})
+			n, err := w.Resolver(Node{Nt: TableName, V: fx.TableName.Name.String()}, tblMap)
 			if err != nil {
 				return "", err
 			}
@@ -133,16 +147,16 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 	}
 	if fx, ok := node.(*sqlparser.AliasedExpr); ok {
 		if fx.As.IsEmpty() {
-			return w.walkSQLNode(fx.Expr)
+			return w.walkSQLNode(fx.Expr, tblMap)
 
 		}
 
-		nAlias, err := w.Resolver(Node{Nt: Alias, V: fx.As.String()})
+		nAlias, err := w.Resolver(Node{Nt: Alias, V: fx.As.String()}, tblMap)
 
 		if err != nil {
 			return "", err
 		}
-		n, err := w.walkSQLNode(fx.Expr)
+		n, err := w.walkSQLNode(fx.Expr, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -151,13 +165,13 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 	if fx, ok := node.(*sqlparser.SQLVal); ok {
 		strVal := string(fx.Val)
 		if pName, ok := isParam(strVal); ok {
-			n, err := w.Resolver(Node{Nt: Params, V: pName})
+			n, err := w.Resolver(Node{Nt: Params, V: pName}, tblMap)
 			if err != nil {
 				return "", err
 			}
 			return n.V, nil
 		} else {
-			n, err := w.Resolver(Node{Nt: Value, V: string(fx.Val)})
+			n, err := w.Resolver(Node{Nt: Value, V: string(fx.Val)}, tblMap)
 			if err != nil {
 				return "", err
 			}
@@ -170,17 +184,17 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 		fieldName = strings.TrimLeft(fieldName, " ")
 
 		if strings.HasPrefix(fieldName, "@") {
-			n, err := w.Resolver(Node{Nt: Params, V: fieldName[1:]})
+			n, err := w.Resolver(Node{Nt: Params, V: fieldName[1:]}, tblMap)
 			if err != nil {
 				return "", err
 			}
 			return n.V, nil
 		} else {
-			n, err := w.Resolver(Node{Nt: Field, V: fieldName})
+			n, err := w.Resolver(Node{Nt: Field, V: fieldName}, tblMap)
 			if err != nil {
 				return "", err
 			}
-			tableName, err := w.walkSQLNode(fx.Qualifier)
+			tableName, err := w.walkSQLNode(fx.Qualifier, tblMap)
 			if err != nil {
 				return "", err
 			}
@@ -193,23 +207,23 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 	}
 	if fx, ok := node.(*sqlparser.ParenExpr); ok {
 
-		return w.walkSQLParen(fx)
+		return w.walkSQLParen(fx, tblMap)
 
 	}
 	if fx, ok := node.(*sqlparser.BinaryExpr); ok {
 
-		return w.walkOnBinaryExpr(fx)
+		return w.walkOnBinaryExpr(fx, tblMap)
 
 	}
 	if fx, ok := node.(*sqlparser.FuncExpr); ok {
-		return w.walkOnFuncExpr(fx)
+		return w.walkOnFuncExpr(fx, tblMap)
 	}
 	if fx, ok := node.(*sqlparser.JoinTableExpr); ok {
-		return w.walkOnJoinTable(fx)
+		return w.walkOnJoinTable(fx, tblMap)
 	}
 	if fx, ok := node.(sqlparser.TableExprs); ok {
 
-		return w.walkOnTable(fx)
+		return w.walkOnTable(fx, tblMap)
 	}
 	if fx, ok := node.(sqlparser.TableName); ok {
 		if fx.Name.IsEmpty() {
@@ -217,14 +231,14 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 		}
 		strAlias := ""
 		if !fx.Qualifier.IsEmpty() {
-			strAliasGet, err := w.walkSQLNode(fx.Qualifier)
+			strAliasGet, err := w.walkSQLNode(fx.Qualifier, tblMap)
 			if err != nil {
 				return "", err
 			}
 			strAlias = strAliasGet
 
 		}
-		n, err := w.Resolver(Node{Nt: TableName, V: fx.Name.String()})
+		n, err := w.Resolver(Node{Nt: TableName, V: fx.Name.String()}, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -235,15 +249,15 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 
 	}
 	if fx, ok := node.(*sqlparser.Where); ok {
-		return w.walkOnWhere(fx)
+		return w.walkOnWhere(fx, tblMap)
 
 	}
 	if fx, ok := node.(*sqlparser.ComparisonExpr); ok {
-		strLeft, err := w.walkSQLNode(fx.Left)
+		strLeft, err := w.walkSQLNode(fx.Left, tblMap)
 		if err != nil {
 			return "", err
 		}
-		strRight, err := w.walkSQLNode(fx.Right)
+		strRight, err := w.walkSQLNode(fx.Right, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -251,17 +265,17 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 	}
 	if fx, ok := node.(*sqlparser.AliasedTableExpr); ok {
 
-		return w.walkSQLNode(fx.Expr)
+		return w.walkSQLNode(fx.Expr, tblMap)
 	}
 	if fx, ok := node.(*sqlparser.JoinTableExpr); ok {
-		return w.walkOnJoinTable(fx)
+		return w.walkOnJoinTable(fx, tblMap)
 	}
 	if fx, ok := node.(sqlparser.JoinCondition); ok {
-		retStr, err := w.walkSQLNode(fx.On)
+		retStr, err := w.walkSQLNode(fx.On, tblMap)
 		if err != nil {
 			return "", err
 		}
-		retStrUsing, err := w.walkSQLNode(fx.Using)
+		retStrUsing, err := w.walkSQLNode(fx.Using, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -273,7 +287,7 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 	if fx, ok := node.(sqlparser.Columns); ok {
 		ret := []string{}
 		for _, col := range fx {
-			s, err := w.walkSQLNode(col)
+			s, err := w.walkSQLNode(col, tblMap)
 			if err != nil {
 				return "", err
 			}
@@ -282,16 +296,141 @@ func (w *Walker) walkSQLNode(node sqlparser.SQLNode) (string, error) {
 		return strings.Join(ret, ", "), nil
 	}
 	if fx, ok := node.(sqlparser.GroupBy); ok {
-		return w.walkOnGroupBy(fx)
+		return w.walkOnGroupBy(fx, tblMap)
+	}
+	if fx, ok := node.(*sqlparser.Select); ok {
+		return w.walkOnSelect(fx, tblMap)
+	}
+	if fx, ok := node.(*sqlparser.OrderBy); ok {
+		return w.walkOnOrderBy(fx, tblMap)
+	}
+	if fx, ok := node.(sqlparser.OrderBy); ok {
+		return w.walkOnOrderBy(&fx, tblMap)
+	}
+	if fx, ok := node.(*sqlparser.Subquery); ok {
+		return w.walkOnSubquery(*fx, tblMap)
+
+	}
+	if fx, ok := node.(sqlparser.ColIdent); ok {
+		n, err := w.Resolver(Node{Nt: Field, V: fx.String()}, tblMap)
+		if err != nil {
+			return "", err
+		}
+		return n.V, nil
+
+	}
+	if fx, ok := node.(*sqlparser.Limit); ok {
+		if fx.Offset == nil && fx.Rowcount == nil {
+			return "", fmt.Errorf("syntax error")
+		}
+		if fx.Offset == nil && fx.Rowcount != nil {
+			rc, err := w.walkSQLNode(fx.Rowcount, tblMap)
+			if err != nil {
+				return "", err
+			}
+			n, err := w.Resolver(Node{Nt: OffsetAndLimit, Limit: rc}, tblMap)
+			if err != nil {
+				return "", err
+			}
+			if n.V == "" {
+				errMsg := fmt.Errorf("It looks like you forget handle Nt value OffsetAndLimit in Resolver function")
+				return "", errMsg
+			}
+			return "LIMIT " + n.V, nil
+		}
+
+		if fx.Offset != nil && fx.Rowcount == nil {
+			rc, err := w.walkSQLNode(fx.Offset, tblMap)
+			if err != nil {
+				return "", err
+			}
+			n, err := w.Resolver(Node{Nt: OffsetAndLimit, Offset: rc}, tblMap)
+			if err != nil {
+				return "", err
+			}
+			if n.V == "" {
+				errMsg := fmt.Errorf("It looks like you forget handle Nt value OffsetAndLimit in Resolver function")
+				return "", errMsg
+			}
+			return "LIMIT " + n.V, nil
+		}
+		if fx.Offset != nil && fx.Rowcount != nil {
+			ofs, err := w.walkSQLNode(fx.Offset, tblMap)
+			if err != nil {
+				return "", err
+			}
+			rc, err := w.walkSQLNode(fx.Rowcount, tblMap)
+			if err != nil {
+				return "", err
+			}
+			n, err := w.Resolver(Node{Nt: OffsetAndLimit, Offset: ofs, Limit: rc}, tblMap)
+			if err != nil {
+				return "", err
+			}
+			if n.V == "" {
+				errMsg := fmt.Errorf("It looks like you forget handle Nt value OffsetAndLimit in Resolver function")
+				return "", errMsg
+			}
+			return n.V, nil
+		}
+
+	}
+	if fx, ok := node.(*sqlparser.AndExpr); ok {
+		strL, err := w.walkSQLNode(fx.Left, tblMap)
+		if err != nil {
+			return "", err
+		}
+		strR, err := w.walkSQLNode(fx.Right, tblMap)
+		if err != nil {
+			return "", err
+		}
+		return strL + " AND " + strR, nil
+	}
+	if fx, ok := node.(*sqlparser.OrExpr); ok {
+		strL, err := w.walkSQLNode(fx.Left, tblMap)
+		if err != nil {
+			return "", err
+		}
+		strR, err := w.walkSQLNode(fx.Right, tblMap)
+		if err != nil {
+			return "", err
+		}
+		return strL + " OR " + strR, nil
+	}
+	if fx, ok := node.(*sqlparser.NotExpr); ok {
+		strL, err := w.walkSQLNode(fx.Expr, tblMap)
+		if err != nil {
+			return "", err
+		}
+		return "NOT " + strL, nil
+
+	}
+	if fx, ok := node.(sqlparser.TableNames); ok {
+		ret := []string{}
+		for _, tbl := range fx {
+			strTbl, err := w.walkSQLNode(tbl, tblMap)
+			if err != nil {
+				return "", err
+			}
+			ret = append(ret, strTbl)
+		}
+		return strings.Join(ret, ", "), nil
 	}
 
 	panic(fmt.Sprintf("unsupported type %s in parser.walkSQLNode", reflect.TypeOf(node)))
 
 }
-func (w *Walker) walkOnGroupBy(stmt sqlparser.GroupBy) (string, error) {
+func (w *Walker) walkOnSubquery(stmt sqlparser.Subquery, tblMap *TableMap) (string, error) {
+	subquery, err := w.walkOnStatement(stmt.Select, tblMap)
+	if err != nil {
+		return "", err
+	}
+	return "(" + subquery + ")", nil
+}
+func (w *Walker) walkOnGroupBy(stmt sqlparser.GroupBy, tblMap *TableMap) (string, error) {
 	ret := []string{}
 	for _, expr := range stmt {
-		s, err := w.walkSQLNode(expr)
+		s, err := w.walkSQLNode(expr, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -299,29 +438,29 @@ func (w *Walker) walkOnGroupBy(stmt sqlparser.GroupBy) (string, error) {
 	}
 	return strings.Join(ret, ", "), nil
 }
-func (w *Walker) walkOnWhere(stmt *sqlparser.Where) (string, error) {
+func (w *Walker) walkOnWhere(stmt *sqlparser.Where, tblMap *TableMap) (string, error) {
 
 	if stmt.Expr != nil {
-		where, err := w.walkSQLNode(stmt.Expr)
+		where, err := w.walkSQLNode(stmt.Expr, tblMap)
 		if err != nil {
 			return "", err
 		}
-		return "WHERE " + where, nil
+		return where, nil
 	}
 	return "", fmt.Errorf("sybnax error")
 }
-func (w *Walker) walkOnTable(expr sqlparser.TableExprs) (string, error) {
+func (w *Walker) walkOnTable(expr sqlparser.TableExprs, tblMap *TableMap) (string, error) {
 	ret := []string{}
 	for _, expr := range expr {
 		if tbl, ok := expr.(*sqlparser.AliasedTableExpr); ok {
 
-			strTableName, err := w.walkSQLNode(tbl.Expr)
+			strTableName, err := w.walkSQLNode(tbl.Expr, tblMap)
 			if err != nil {
 				return "", err
 			}
 
 			if !tbl.As.IsEmpty() {
-				n, err := w.Resolver(Node{Nt: Alias, V: tbl.As.String()})
+				n, err := w.Resolver(Node{Nt: Alias, V: tbl.As.String()}, tblMap)
 				if err != nil {
 					return "", err
 				}
@@ -332,7 +471,7 @@ func (w *Walker) walkOnTable(expr sqlparser.TableExprs) (string, error) {
 			continue
 		}
 		if tbl, ok := expr.(*sqlparser.JoinTableExpr); ok {
-			strJoin, err := w.walkOnJoinTable(tbl)
+			strJoin, err := w.walkOnJoinTable(tbl, tblMap)
 			if err != nil {
 				return "", err
 			}
@@ -343,15 +482,15 @@ func (w *Walker) walkOnTable(expr sqlparser.TableExprs) (string, error) {
 	}
 	return strings.Join(ret, ", "), nil
 }
-func (w *Walker) walkOnFuncExpr(expr *sqlparser.FuncExpr) (string, error) {
+func (w *Walker) walkOnFuncExpr(expr *sqlparser.FuncExpr, tblMap *TableMap) (string, error) {
 	funcName := expr.Name.String()
-	n, err := w.Resolver(Node{Nt: Function, V: funcName})
+	n, err := w.Resolver(Node{Nt: Function, V: funcName}, tblMap)
 	if err != nil {
 		return "", err
 	}
 	params := []string{}
 	for _, p := range expr.Exprs {
-		s, err := w.walkSQLNode(p)
+		s, err := w.walkSQLNode(p, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -359,11 +498,11 @@ func (w *Walker) walkOnFuncExpr(expr *sqlparser.FuncExpr) (string, error) {
 	}
 	return n.V + "(" + strings.Join(params, ", ") + ")", nil
 }
-func (w *Walker) walkSQLParen(expr *sqlparser.ParenExpr) (string, error) {
+func (w *Walker) walkSQLParen(expr *sqlparser.ParenExpr, tblMap *TableMap) (string, error) {
 
 	cExpr := expr.Expr
 	if fx, ok := cExpr.(*sqlparser.BinaryExpr); ok {
-		strExpr, err := w.walkOnBinaryExpr(fx)
+		strExpr, err := w.walkOnBinaryExpr(fx, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -373,27 +512,27 @@ func (w *Walker) walkSQLParen(expr *sqlparser.ParenExpr) (string, error) {
 
 	panic(fmt.Sprintf("unsupported type %s in parser.walkSQLParen", reflect.TypeOf(cExpr)))
 }
-func (w *Walker) walkOnBinaryExpr(expr *sqlparser.BinaryExpr) (string, error) {
-	op, err := w.Resolver(Node{Nt: Unanry, V: expr.Operator})
+func (w *Walker) walkOnBinaryExpr(expr *sqlparser.BinaryExpr, tblMap *TableMap) (string, error) {
+	op, err := w.Resolver(Node{Nt: Unanry, V: expr.Operator}, tblMap)
 	if err != nil {
 		return "", err
 	}
-	left, err := w.walkSQLNode(expr.Left)
+	left, err := w.walkSQLNode(expr.Left, tblMap)
 	if err != nil {
 		return "", err
 	}
-	right, err := w.walkSQLNode(expr.Right)
+	right, err := w.walkSQLNode(expr.Right, tblMap)
 	if err != nil {
 		return "", err
 	}
 	return left + " " + op.V + " " + right, nil
 }
-func (w *Walker) walkOnSelect(stmt *sqlparser.Select) (string, error) {
+func (w *Walker) walkOnSelect(stmt *sqlparser.Select, tblMap *TableMap) (string, error) {
 	ret := []string{}
 	selector := []string{}
 	for _, sel := range stmt.SelectExprs {
 
-		s, err := w.walkSQLNode(sel)
+		s, err := w.walkSQLNode(sel, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -401,14 +540,14 @@ func (w *Walker) walkOnSelect(stmt *sqlparser.Select) (string, error) {
 	}
 	ret = append(ret, strings.Join(selector, ", "))
 	if stmt.From != nil {
-		from, err := w.walkSQLNode(stmt.From)
+		from, err := w.walkSQLNode(stmt.From, tblMap)
 		if err != nil {
 			return "", err
 		}
 		ret = append(ret, "FROM "+from)
 	}
 	if stmt.GroupBy != nil {
-		groupBy, err := w.walkSQLNode(stmt.GroupBy)
+		groupBy, err := w.walkSQLNode(stmt.GroupBy, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -416,14 +555,14 @@ func (w *Walker) walkOnSelect(stmt *sqlparser.Select) (string, error) {
 
 	}
 	if stmt.Having != nil {
-		groupBy, err := w.walkSQLNode(stmt.Having)
+		groupBy, err := w.walkSQLNode(stmt.Having, tblMap)
 		if err != nil {
 			return "", err
 		}
 		ret = append(ret, "HAVING "+groupBy)
 	}
 	if stmt.Where != nil {
-		where, err := w.walkSQLNode(stmt.Where)
+		where, err := w.walkSQLNode(stmt.Where, tblMap)
 		if err != nil {
 			return "", err
 		}
@@ -431,39 +570,161 @@ func (w *Walker) walkOnSelect(stmt *sqlparser.Select) (string, error) {
 	}
 
 	if stmt.OrderBy != nil {
-		orderBy, err := w.walkSQLNode(stmt.OrderBy)
+		orderBy, err := w.walkSQLNode(stmt.OrderBy, tblMap)
 		if err != nil {
 			return "", err
 		}
 		ret = append(ret, "ORDER BY "+orderBy)
 	}
 
+	if stmt.Limit != nil {
+		limit, err := w.walkSQLNode(stmt.Limit, tblMap)
+		if err != nil {
+			return "", err
+		}
+		ret = append(ret, limit)
+	}
+
 	return "SELECT " + strings.Join(ret, " "), nil
 
 }
-func (w *Walker) walkOnInsert(stmt *sqlparser.Insert) (string, error) {
-	panic("not implemented")
+func (w *Walker) walkOnInsert(stmt *sqlparser.Insert, tblMap *TableMap) (string, error) {
+
+	tableName, err := w.walkSQLNode(stmt.Table, tblMap)
+	if err != nil {
+		return "", err
+	}
+	cols := []string{}
+
+	for _, col := range stmt.Columns {
+		colName, err := w.walkSQLNode(col, tblMap)
+		if err != nil {
+			return "", err
+		}
+		cols = append(cols, colName)
+	}
+	if fx, ok := stmt.Rows.(*sqlparser.Select); ok {
+		sqlSelect, err := w.walkOnSelect(fx, tblMap)
+		if err != nil {
+			return "", err
+		}
+		return "INSERT INTO " + tableName + " (" + strings.Join(cols, ", ") + ") " + sqlSelect, nil
+	}
+	if fx, ok := stmt.Rows.(sqlparser.Values); ok {
+		values := []string{}
+		for _, row := range fx {
+			rowStr := []string{}
+			for _, val := range row {
+				valStr, err := w.walkSQLNode(val, tblMap)
+				if err != nil {
+					return "", err
+				}
+				rowStr = append(rowStr, valStr)
+			}
+			values = append(values, "("+strings.Join(rowStr, ", ")+")")
+		}
+		return "INSERT INTO " + tableName + " (" + strings.Join(cols, ", ") + ") VALUES " + strings.Join(values, ", "), nil
+	}
+	panic(fmt.Sprintf("unsupported type %s in parser.walkOnInsert", reflect.TypeOf(stmt.Rows)))
 }
-func (w *Walker) walkOnUpdate(stmt *sqlparser.Update) (string, error) {
-	panic("not implemented")
+func (w *Walker) walkOnUnion(stmt *sqlparser.Union, tblMap *TableMap) (string, error) {
+	left, err := w.walkSQLNode(stmt.Left, tblMap)
+	if err != nil {
+		return "", err
+	}
+	right, err := w.walkSQLNode(stmt.Right, tblMap)
+	if err != nil {
+		return "", err
+	}
+	return left + " " + stmt.Type + " " + right, nil
 }
-func (w *Walker) walkOnDelete(stmt *sqlparser.Delete) (string, error) {
-	panic("not implemented")
+func (w *Walker) walkOnUpdate(stmt *sqlparser.Update, tblMap *TableMap) (string, error) {
+	tableName, err := w.walkSQLNode(stmt.TableExprs, tblMap)
+	if err != nil {
+		return "", err
+	}
+	ret := []string{}
+	for _, col := range stmt.Exprs {
+		colName, err := w.walkSQLNode(col.Name, tblMap)
+		if err != nil {
+			return "", err
+		}
+		colValue, err := w.walkSQLNode(col.Expr, tblMap)
+		if err != nil {
+			return "", err
+		}
+		ret = append(ret, colName+" = "+colValue)
+	}
+	if stmt.Where != nil {
+		where, err := w.walkSQLNode(stmt.Where, tblMap)
+		if err != nil {
+			return "", err
+		}
+		ret = append(ret, "WHERE "+where)
+	}
+	return "UPDATE " + tableName + " SET " + strings.Join(ret, ", "), nil
+
 }
-func (w *Walker) walkOnJoinTable(expr *sqlparser.JoinTableExpr) (string, error) {
-	strLeft, err := w.walkSQLNode(expr.LeftExpr)
+func (w *Walker) walkOnDelete(stmt *sqlparser.Delete, tblMap *TableMap) (string, error) {
+	tableName, err := w.walkSQLNode(stmt.Targets, tblMap)
+	if err != nil {
+		return "", err
+	}
+	tableNameUsing, err := w.walkSQLNode(stmt.TableExprs, tblMap)
 	if err != nil {
 		return "", err
 	}
 
-	strRight, err := w.walkSQLNode(expr.RightExpr)
+	strWhere, err := w.walkSQLNode(stmt.Where, tblMap)
+
 	if err != nil {
 		return "", err
 	}
-	strConditional, err := w.walkSQLNode(expr.Condition)
+	n, err := w.Resolver(Node{
+		Nt: Using, Un: &UsingNodeOnDelete{
+			TableName:   tableNameUsing,
+			Where:       strWhere,
+			TargetTable: tableName,
+		},
+	}, tblMap)
+	if err != nil {
+		return "", err
+	}
+	if n.Un != nil && n.Un.ReNewSQL != "" {
+		return n.Un.ReNewSQL, nil
+	}
+
+	return "DELETE FROM " + tableName + " USING " + tableNameUsing + " WHERE " + strWhere, nil
+}
+func (w *Walker) walkOnJoinTable(expr *sqlparser.JoinTableExpr, tblMap *TableMap) (string, error) {
+	strLeft, err := w.walkSQLNode(expr.LeftExpr, tblMap)
+	if err != nil {
+		return "", err
+	}
+
+	strRight, err := w.walkSQLNode(expr.RightExpr, tblMap)
+	if err != nil {
+		return "", err
+	}
+	strConditional, err := w.walkSQLNode(expr.Condition, tblMap)
 	if err != nil {
 		return "", err
 	}
 	ret := strLeft + " " + expr.Join + " " + strRight + " ON " + strConditional
 	return ret, nil
+}
+func (w *Walker) walkOnOrderBy(expr *sqlparser.OrderBy, tblMap *TableMap) (string, error) {
+	ret := []string{}
+	for _, order := range *expr {
+		str, err := w.walkSQLNode(order.Expr, tblMap)
+		if err != nil {
+			return "", err
+		}
+		if order.Direction == sqlparser.AscScr {
+			ret = append(ret, str+" ASC")
+		} else {
+			ret = append(ret, str+" DESC")
+		}
+	}
+	return strings.Join(ret, ", "), nil
 }
