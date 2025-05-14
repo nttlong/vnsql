@@ -9,6 +9,23 @@ import (
 	"github.com/nttlong/vnsql/internal/xdb/postgres"
 )
 
+type Cfg struct {
+	Driver   string
+	Host     string
+	Port     int
+	User     string
+	Password string
+	UseSSL   bool
+}
+
+func NewCfg(cfg Cfg) isql.DbCfg {
+	return isql.DbCfg{
+		Driver: cfg.Driver,
+		Host:   cfg.Host,
+		Port:   cfg.Port,
+	}
+}
+
 func NewSql(driver string) (isql.ISql, error) {
 	switch driver {
 	case "mysql":

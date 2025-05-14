@@ -11,6 +11,8 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/nttlong/vnsql/internal/xdb/common"
 	"github.com/nttlong/vnsql/internal/xdb/isql"
+	"github.com/nttlong/vnsql/internal/xdb/parser"
+	pgParser "github.com/nttlong/vnsql/internal/xdb/parser/postgres"
 )
 
 type Postgres struct {
@@ -38,6 +40,26 @@ func (st *SqlStore) GetError() error {
 }
 func (st *SqlStore) GetDbName() string {
 	return st.dbName
+}
+
+var walker = parser.Walker{
+	Resolver: pgParser.PostgresResoler,
+}
+
+func (st *SqlStore) GetCtx() (*isql.DBContext, error) {
+	cfg := st.GetSql().GetConfig()
+	dns := cfg.Dns(st.dbName)
+	retDb, err := sql.Open(cfg.Driver, dns)
+	if err != nil {
+		return nil, err
+	}
+	return &isql.DBContext{
+		DB:              retDb,
+		StatementWalker: walker,
+		Migrator:        st.GetSql().GetMigrate(st.dbName),
+		SqlStore:        st,
+	}, nil
+
 }
 
 func (m *Migrate) SetSqlStore(store isql.ISqlStore) {
@@ -193,11 +215,13 @@ func (m *Migrate) GetSqlCreateTables(entitises ...[]interface{}) ([]string, erro
 var isMigrated sync.Map
 
 func (m *Migrate) DoMigrate(entity interface{}) error {
-	key := m.sqlStore.GetDbName() + "_" + reflect.TypeOf(entity).String()
+	typ := common.GetEntityType(entity)
+	key := m.sqlStore.GetDbName() + "_" + typ.String()
 	if _, ok := isMigrated.Load(key); ok {
 		return nil
 	}
-	sqls, err := m.GetSqlCreateTable(entity)
+	entityTest := reflect.New(typ).Interface()
+	sqls, err := m.GetSqlCreateTable(entityTest)
 	if err != nil {
 		return err
 	}

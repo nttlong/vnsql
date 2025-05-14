@@ -420,3 +420,65 @@ func GetAllIndexInColsInfo(colsInfo []ColInfo) map[string][]ColInfo {
 	}
 	return indexMap
 }
+
+var notTableType = []reflect.Type{
+	reflect.TypeOf(int(0)),
+	reflect.TypeOf(int8(0)),
+	reflect.TypeOf(int16(0)),
+	reflect.TypeOf(int32(0)),
+	reflect.TypeOf(int64(0)),
+	reflect.TypeOf(uint(0)),
+	reflect.TypeOf(uint8(0)),
+	reflect.TypeOf(uint16(0)),
+	reflect.TypeOf(uint32(0)),
+	reflect.TypeOf(uint64(0)),
+	reflect.TypeOf(float32(0)),
+	reflect.TypeOf(float64(0)),
+	reflect.TypeOf(bool(false)),
+	reflect.TypeOf(string("")),
+	reflect.TypeOf(time.Time{}),
+	reflect.TypeOf(uuid.UUID{}),
+}
+var cacheIsTable sync.Map
+var cacheTableName sync.Map
+
+func IsDataTables(entity interface{}) (string, reflect.Type, bool) {
+
+	typ := GetEntityType(entity)
+
+	for _, allowedTyp := range notTableType {
+		if typ == allowedTyp {
+			return "", typ, false
+		}
+	}
+	//chec cace
+
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		tag := field.Tag.Get("db")
+		if tag != "" {
+			//set cache
+			cacheIsTable.Store(typ, true)
+			tableName := typ.Name()
+			cacheTableName.Store(typ, tableName)
+
+			return tableName, typ, true
+		}
+
+	}
+	cacheIsTable.Store(typ, false)
+	return "", typ, false
+}
+func GetEntityType(entity interface{}) reflect.Type {
+	typ := reflect.TypeOf(entity)
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	if typ.Kind() == reflect.Slice {
+		typ = typ.Elem()
+	}
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	return typ
+}

@@ -3,6 +3,7 @@ package xdb_test
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -450,4 +451,107 @@ func TestPostgresParse(t *testing.T) {
 			fmt.Println(fmt.Sprintf("[%d] %s->%s", i, sqlR, sqlP))
 		}
 	}
+}
+
+var testCreateDb = []string{
+	"create database testdb->CREATE DATABASE \"testdb\" in db owner;CREATE EXTENSION IF NOT EXISTS citext in db testdb;",
+}
+
+func TestCreateDb(t *testing.T) {
+	OnCreateDB := func(dbName string) (parser.DBDDLCmds, error) {
+		ret := []*parser.DBDDLCommand{}
+
+		sqlCreateDb := "CREATE DATABASE \"" + dbName + "\""
+		ret = append(ret, &parser.DBDDLCommand{
+			CommandText: &sqlCreateDb,
+		})
+
+		sqlEnableCiTextExtension := "CREATE EXTENSION IF NOT EXISTS citext"
+		ret = append(ret, &parser.DBDDLCommand{
+			CommandText: &sqlEnableCiTextExtension,
+			DbName:      &dbName,
+		})
+		return ret, nil
+
+	}
+	w := parser.Walker{
+		OnCreateDb: &OnCreateDB,
+		Resolver: func(node parser.Node, tblMap *parser.TableMap) (parser.Node, error) {
+			if node.Nt == parser.Function {
+				return node, nil
+			}
+			if node.Nt == parser.Field || node.Nt == parser.TableName || node.Nt == parser.Alias {
+				node.V = "\"" + node.V + "\""
+			}
+			return node, nil
+		},
+	}
+	for _, sql := range testCreateDb {
+		sqlR := strings.Split(sql, "->")[0]
+		sqlExpected := strings.Split(sql, "->")[1]
+		sqlP, err := w.ParseDBDLL(sqlR)
+		assert.NoError(t, err)
+		assert.Equal(t, sqlP.String(), sqlExpected)
+
+	}
+}
+
+type JobsProfile struct {
+	ProfileId   int `db:"pk"`
+	FromTime    time.Time
+	ToTime      *time.Time
+	Description string
+}
+type BaseInfo struct {
+	CreatedOn time.Time
+	UpdatedOn time.Time
+}
+type Employee struct {
+	BaseInfo
+
+	Id       int    `db:"pk"`
+	Name     string `db:"idx"`
+	Code     string `db:"unique;varchar(10)"`
+	Col1     *string
+	Guild    uuid.UUID
+	Guild1   *uuid.UUID
+	TimeCol  time.Time
+	TimeCol1 *time.Time
+	Profile  []*JobsProfile `db:"foreignkey:ProfileId"`
+}
+
+var expectValues = []string{
+	"<nil>",
+	"Name:Id ; IndexName: ; IsPrimary:true ; IsUnique:false ; IsIndex:false ; Len:-1 ; AllowNull:false ",
+	"Name:Name ; IndexName:Name ; IsPrimary:false ; IsUnique:false ; IsIndex:true ; Len:-1 ; AllowNull:false ",
+	"Name:Code ; IndexName: ; IsPrimary:false ; IsUnique:true ; IsIndex:false ; Len:10 ; AllowNull:false ",
+	"Name:Col1 ; IndexName: ; IsPrimary:false ; IsUnique:false ; IsIndex:false ; Len:-1 ; AllowNull:true ",
+	"Name:Guild ; IndexName: ; IsPrimary:false ; IsUnique:false ; IsIndex:false ; Len:-1 ; AllowNull:false ",
+	"Name:Guild1 ; IndexName: ; IsPrimary:false ; IsUnique:false ; IsIndex:false ; Len:-1 ; AllowNull:true ",
+	"Name:TimeCol ; IndexName: ; IsPrimary:false ; IsUnique:false ; IsIndex:false ; Len:-1 ; AllowNull:false ",
+	"Name:TimeCol1 ; IndexName: ; IsPrimary:false ; IsUnique:false ; IsIndex:false ; Len:-1 ; AllowNull:true ",
+}
+
+func TestGetColuImfo(t *testing.T) {
+
+	typ := reflect.TypeOf(Employee{})
+	for i := 0; i < typ.NumField(); i++ {
+		col := parser.GetColInfo(typ.Field(i))
+		val := col.String()
+		if i < len(expectValues) {
+			if expectValues[i] != val {
+				fmt.Println("[", i, "] ", val)
+			}
+			assert.Equal(t, expectValues[i], val)
+		} else {
+			fmt.Println("[", i, "] ", val)
+		}
+
+	}
+}
+func TestGetTableInfoByType(t *testing.T) {
+	tbl, err := parser.GetTableInfoByType(reflect.TypeOf(Employee{}))
+	assert.NoError(t, err)
+	print(tbl)
+
 }

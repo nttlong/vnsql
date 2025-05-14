@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/nttlong/vnsql/internal/xdb/parser"
@@ -22,10 +21,12 @@ func PostgresResoler(node parser.Node, tblMap *parser.TableMap) (parser.Node, er
 	if node.Nt == parser.Value {
 		if _, ok := node.IsDate(node.V); ok {
 			node.V = "'" + node.V + "'"
-		}
-		if _, ok := node.IsBool(node.V); ok {
+		} else if _, ok := node.IsBool(node.V); ok {
 			node.V = "TRUE"
+		} else {
+			node.V = "'" + node.V + "'"
 		}
+
 	}
 	return node, nil
 }
@@ -41,6 +42,5 @@ func resoveFunction(node parser.Node) (parser.Node, error) {
 		node.Nt = parser.Field
 		return node, nil
 	}
-
-	panic(fmt.Sprintf("not support function: %s in xdb/parser/postgres", node.V))
+	return node, nil
 }
