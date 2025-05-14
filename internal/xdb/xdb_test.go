@@ -1,6 +1,7 @@
 package xdb_test
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"reflect"
@@ -509,15 +510,18 @@ type BaseInfo struct {
 type Employee struct {
 	BaseInfo
 
-	Id       int    `db:"pk"`
-	Name     string `db:"idx"`
-	Code     string `db:"unique;varchar(10)"`
-	Col1     *string
-	Guild    uuid.UUID
-	Guild1   *uuid.UUID
-	TimeCol  time.Time
-	TimeCol1 *time.Time
-	Profile  []*JobsProfile `db:"foreignkey:ProfileId"`
+	Id        int    `db:"pk"`
+	Name      string `db:"idx"`
+	Code      string `db:"unique;varchar(10)"`
+	Col1      *string
+	Guild     uuid.UUID
+	Guild1    *uuid.UUID
+	TimeCol   time.Time
+	TimeCol1  *time.Time
+	ColIndex1 int            `db:"index:idx1"`
+	ColIndex2 *time.Time     `db:"index:idx1"`
+	COlUUID   *uuid.UUID     `db:"index:idx1"`
+	Profile   []*JobsProfile `db:"foreignkey:ProfileId"`
 }
 
 var expectValues = []string{
@@ -553,5 +557,30 @@ func TestGetTableInfoByType(t *testing.T) {
 	tbl, err := parser.GetTableInfoByType(reflect.TypeOf(Employee{}))
 	assert.NoError(t, err)
 	print(tbl)
+
+}
+func TestGetTableInfoOfEntity(t *testing.T) {
+	tbl, err := parser.GetTableInfo(&Employee{})
+	assert.NoError(t, err)
+	print(tbl)
+
+}
+func TestCreateSQL(t *testing.T) {
+	tbl, err := parser.GetTableInfo(&Employee{})
+	assert.NoError(t, err)
+	sqls := tbl.GetSql("postgres")
+	assert.NoError(t, err)
+	db, err := sql.Open("postgres", "postgres://postgres:123456@localhost:5432/testdb?sslmode=disable")
+	assert.NoError(t, err)
+	for _, sqlE := range sqls {
+		_, err := db.Exec(sqlE)
+
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			assert.NoError(t, err)
+			println(err.Error())
+		}
+		println(sqlE)
+
+	}
 
 }
