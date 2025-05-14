@@ -841,15 +841,16 @@ func (w *Walker) walkOnOrderBy(expr *sqlparser.OrderBy, tblMap *TableMap) (strin
 }
 
 type ColInfo struct {
-	Name      string
-	FieldType reflect.StructField
-	Tag       string
-	IndexName string
-	IsPrimary bool
-	IsUnique  bool
-	IsIndex   bool
-	Len       int
-	AllowNull bool
+	Name         string
+	FieldType    reflect.StructField
+	Tag          string
+	IndexName    string
+	IsPrimary    bool
+	IsUnique     bool
+	IsIndex      bool
+	Len          int
+	AllowNull    bool
+	DefaultValue string
 }
 
 func (c *ColInfo) String() string {
@@ -893,6 +894,8 @@ var replacerConstraint = map[string][]string{
 	"idx":  {"index", "index_key", "indexkey", "index_constraint"},
 	"text": {"vachar", "varchar", "varchar2"},
 	"size": {"length", "len"},
+	"df":   {"default", "default_value", "default_value_constraint"},
+	"auto": {"auto_increment", "autoincrement", "serial_key", "serialkey", "serial_key_constraint"},
 }
 var hashCheckIsDbFieldAble = map[reflect.Type]bool{
 	reflect.TypeOf(int(0)):      true,
@@ -913,6 +916,11 @@ var hashCheckIsDbFieldAble = map[reflect.Type]bool{
 
 	reflect.TypeOf(decimal.Decimal{}): true,
 	reflect.TypeOf(uuid.UUID{}):       true,
+}
+var mapDefaultValueFuncToPg = map[string]string{
+	"now()":  "CURRENT_TIMESTAMP",
+	"uuid()": "uuid_generate_v4()",
+	"auto":   "SERIAL",
 }
 
 // serilize tag info ex: db:"name,age"
@@ -1022,6 +1030,17 @@ func GetColInfo(field reflect.StructField) *ColInfo {
 			} else {
 				panic(fmt.Errorf("invalid length %s", field.Tag.Get("db")))
 			}
+		}
+		if strings.HasPrefix(tg, "df:") {
+			if strings.Contains(tg, ":") {
+				dfValue := strings.Split(tg, ":")[1]
+				dfValue = strings.Split(dfValue, ";")[0]
+				ret.DefaultValue = dfValue
+			} else {
+				panic(fmt.Errorf("invalid default value %s", field.Tag.Get("db")))
+
+			}
+
 		}
 
 	}
@@ -1210,6 +1229,8 @@ func getSqlOfTableInfoForPostgres(table TableInfo) []string {
 	sql := "CREATE TABLE IF NOT EXISTS \"" + table.TableName + "\" ("
 	colsScript := []string{}
 	scripAlterAddCols := []string{}
+
+	//scriptSeqs := []string{}
 	for _, col := range table.ColInfos {
 		ft := col.FieldType.Type
 		if ft.Kind() == reflect.Ptr {
@@ -1225,7 +1246,7 @@ func getSqlOfTableInfoForPostgres(table TableInfo) []string {
 				colsScript = append(colsScript, strCol)
 			} else {
 
-				if !col.AllowNull {
+				if col.AllowNull {
 					// strCol = fmt.Sprintf("\"%s\" %s NOT NULL", col.Name, dbType)
 					//ALTER TABLE "Employee" ADD COLUMN IF NOT EXISTS email TEXT;
 					strAddCol = fmt.Sprintf("ALTER TABLE IF EXISTS \"%s\" ADD COLUMN IF NOT EXISTS \"%s\" %s", table.TableName, col.Name, dbType)
@@ -1233,8 +1254,31 @@ func getSqlOfTableInfoForPostgres(table TableInfo) []string {
 				} else {
 					// strCol = fmt.Sprintf("\"%s\" %s", col.Name, dbType)
 					//ALTER TABLE "Employee" ADD COLUMN IF NOT EXISTS email TEXT;
-					strAddCol = fmt.Sprintf("ALTER TABLE IF EXISTS \"%s\" ADD COLUMN IF NOT EXISTS \"%s\" %s NOT NULL", table.TableName, col.Name, dbType)
-					scripAlterAddCols = append(scripAlterAddCols, strAddCol)
+					// df := ""
+					// if _, ok := maoGoTyoToPostgresDefaultValue[ft]; ok {
+					// 	df = maoGoTyoToPostgresDefaultValue[ft]
+					// }
+					if col.DefaultValue == "" {
+						strAddCol = fmt.Sprintf("ALTER TABLE IF EXISTS \"%s\" ADD COLUMN IF NOT EXISTS \"%s\" %s NOT NULL", table.TableName, col.Name, dbType)
+						scripAlterAddCols = append(scripAlterAddCols, strAddCol)
+					} else {
+						if dff, ok := mapDefaultValueFuncToPg[col.DefaultValue]; ok {
+							if dff == "SERIAL" {
+								defaultSeq := "\"" + table.TableName + "_" + col.Name + "_seq\""
+								scriptSeq := fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s", defaultSeq)
+								strAddCol = fmt.Sprintf("ALTER TABLE IF EXISTS \"%s\" ADD COLUMN IF NOT EXISTS \"%s\" %s NOT NULL DEFAULT nextval('%s')", table.TableName, col.Name, dbType, defaultSeq)
+								scripAlterAddCols = append(scripAlterAddCols, scriptSeq)
+								scripAlterAddCols = append(scripAlterAddCols, strAddCol)
+							} else {
+								strAddCol = fmt.Sprintf("ALTER TABLE IF EXISTS \"%s\" ADD COLUMN IF NOT EXISTS \"%s\" %s NOT NULL DEFAULT %s", table.TableName, col.Name, dbType, dff)
+								scripAlterAddCols = append(scripAlterAddCols, strAddCol)
+							}
+						} else {
+							strAddCol = fmt.Sprintf("ALTER TABLE IF EXISTS \"%s\" ADD COLUMN IF NOT EXISTS \"%s\" %s NOT NULL DEFAULT %s", table.TableName, col.Name, dbType, col.DefaultValue)
+							scripAlterAddCols = append(scripAlterAddCols, strAddCol)
+						}
+					}
+
 				}
 
 			}
@@ -1320,7 +1364,7 @@ func getSqlOfTableInfoForPostgres(table TableInfo) []string {
 			}
 			fkCol = strings.TrimSuffix(fkCol, ",")
 			relName := table.TableName + "_" + rel.ToTable.TableName + "_fk"
-			strRel := "ALTER TABLE \"" + rel.ToTable.TableName + "\" ADD CONSTRAINT \"" + relName + "\" FOREIGN KEY (" + fkCol + ") REFERENCES \"" + rel.FromTable.TableName + "\" (" + keyCOls + ")"
+			strRel := "ALTER TABLE \"" + rel.ToTable.TableName + "\" ADD CONSTRAINT \"" + relName + "\" FOREIGN KEY (" + fkCol + ") REFERENCES \"" + rel.FromTable.TableName + "\" (" + keyCOls + ") MATCH SIMPLE ON UPDATE CASCADE ON DELETE NO ACTION"
 			scriptCreateRel = append(scriptCreateRel, strRel)
 
 		}

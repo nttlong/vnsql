@@ -502,6 +502,8 @@ type JobsProfile struct {
 	FromTime    time.Time
 	ToTime      *time.Time
 	Description string
+	Point       float32 `db:"default:14.0"`
+	OrderId     int32   `db:"df:auto"`
 }
 type BaseInfo struct {
 	CreatedOn time.Time
@@ -522,6 +524,8 @@ type Employee struct {
 	ColIndex2 *time.Time     `db:"index:idx1"`
 	COlUUID   *uuid.UUID     `db:"index:idx1"`
 	Profile   []*JobsProfile `db:"foreignkey:ProfileId"`
+	JobTime   time.Time
+	StartTimr time.Time
 }
 
 var expectValues = []string{
