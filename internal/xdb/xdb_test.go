@@ -530,11 +530,19 @@ type Employee struct {
 }
 type Dept struct {
 	BaseInfo
-	Id       int         `db:"pk;df:auto"`
-	Name     string      `db:"idx"`
-	Code     string      `db:"unique;varchar(10)"`
-	Emps     []*Employee `db:"foreignkey:DeptId"`
-	CreateOn time.Time   `db:"default:now()"`
+	Id   int    `db:"pk;df:auto"`
+	Name string `db:"idx"`
+	Code string `db:"unique;varchar(10)"`
+	//Emps              []*Employee `db:"foreignkey:DeptId"`
+	CreateOn          time.Time `db:"default:now()"`
+	Description       string    `db:"df:''"`
+	CreatedOn         time.Time `db:"default:now()"`
+	UpdatedOn         *time.Time
+	CreatedBy         string     `db:"default:'system';idx"`
+	UpdatedBy         *string    `db:"idx"`
+	EstablishmentDate time.Time  `db:"idx;df:now()"`
+	DissolutionDate   *time.Time `db:"idx"`
+	SecretKey         uuid.UUID  `db:"default:gen_random_uuid()"`
 }
 
 var expectValues = []string{
@@ -595,5 +603,55 @@ func TestCreateSQL(t *testing.T) {
 		println(sqlE)
 
 	}
+
+}
+func TestDbContext(t *testing.T) {
+	dbContext := parser.NewDbContext(parser.DbCfg{
+		Driver:   "postgres",
+		Host:     "localhost",
+		Port:     5432,
+		User:     "postgres",
+		Password: "123456",
+		UseSSL:   false,
+	})
+	dbContext.Open()
+	err := dbContext.Ping()
+	assert.NoError(t, err)
+	dbContext.Close()
+	tanetDb, err := dbContext.CreateCtx("db_001")
+	assert.NoError(t, err)
+	start := time.Now()
+	tanetDb.Open()
+	// err = tanetDb.Insert(&Dept{
+	// 	Name:      "test",
+	// 	Code:      "test2ee",
+	// 	CreatedBy: "admin",
+	// })
+	n := time.Since(start).Abs().Milliseconds()
+	fmt.Println(fmt.Sprintf("elapse time: %04d", n))
+
+	for i := 70000; i < 80000; i++ {
+		start = time.Now()
+		dd := time.Now().Add(time.Hour * 24)
+		dep := Dept{
+			Name:              "test",
+			Code:              "test" + fmt.Sprintf("%04d", i),
+			CreatedBy:         "admin",
+			EstablishmentDate: time.Now(),
+			DissolutionDate:   &dd,
+		}
+		err = tanetDb.Insert(&dep)
+
+		n := time.Since(start).Abs().Milliseconds()
+		if err != nil {
+			fmt.Println(fmt.Sprintf("elapse time: %04d %s", n, err))
+		} else {
+			fmt.Println(fmt.Sprintf("elapse time: %04d", n))
+		}
+
+	}
+
+	assert.NoError(t, err)
+	tanetDb.Close()
 
 }

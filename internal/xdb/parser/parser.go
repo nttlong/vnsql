@@ -1,10 +1,12 @@
 package parser
 
 import (
+	"database/sql"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -99,8 +101,9 @@ func (dd DBDDLCmds) String() string {
 }
 
 type Walker struct {
-	Resolver   func(node Node, tblMap *TableMap) (Node, error)
-	OnCreateDb *func(dbName string) (DBDDLCmds, error)
+	Resolver          func(node Node, tblMap *TableMap) (Node, error)
+	OnCreateDb        *func(dbName string) (DBDDLCmds, error)
+	ResolverInsertSQL *func(sql string, tablIfo TableInfo) (*string, error)
 }
 
 var paramPrefix []string = []string{"@", ":"}
@@ -159,6 +162,7 @@ func (w *Walker) ParseDBDLL(sql string) (DBDDLCmds, error) {
 }
 
 func (w *Walker) Parse(sql string, tblMap *TableMap) (string, error) {
+	sql = " " + sql
 	stm, err := sqlparser.Parse(sql)
 	if err != nil {
 		return "", err
@@ -167,7 +171,10 @@ func (w *Walker) Parse(sql string, tblMap *TableMap) (string, error) {
 		panic(fmt.Sprintf("not support ddl: %s. Please call Walker.ParseDBDLL instead ", sql))
 
 	}
-	if !strings.Contains(strings.ToLower(sql), " from ") {
+	if !strings.Contains(strings.ToLower(sql), " from ") &&
+		!strings.Contains(strings.ToLower(sql), " insert ") &&
+		!strings.Contains(strings.ToLower(sql), " update ") &&
+		!strings.Contains(strings.ToLower(sql), " delete ") {
 		if fx, ok := stm.(*sqlparser.Select); ok {
 			return w.walkOnSelectOnly(fx, tblMap)
 		}
@@ -841,16 +848,17 @@ func (w *Walker) walkOnOrderBy(expr *sqlparser.OrderBy, tblMap *TableMap) (strin
 }
 
 type ColInfo struct {
-	Name         string
-	FieldType    reflect.StructField
-	Tag          string
-	IndexName    string
-	IsPrimary    bool
-	IsUnique     bool
-	IsIndex      bool
-	Len          int
-	AllowNull    bool
-	DefaultValue string
+	Name          string
+	FieldType     reflect.StructField
+	Tag           string
+	IndexName     string
+	IsPrimary     bool
+	IsUnique      bool
+	IsIndex       bool
+	Len           int
+	AllowNull     bool
+	DefaultValue  string
+	IndexOnStruct int
 }
 
 func (c *ColInfo) String() string {
@@ -882,9 +890,11 @@ type RelationshipInfo struct {
 	ToCols    []ColInfo
 }
 type TableInfo struct {
-	TableName    string
-	ColInfos     []ColInfo
-	Relationship []*RelationshipInfo
+	TableName     string
+	ColInfos      []ColInfo
+	Relationship  []*RelationshipInfo
+	MapCols       map[string]*ColInfo
+	AutoValueCols map[string]*ColInfo
 }
 
 var replacerConstraint = map[string][]string{
@@ -1046,7 +1056,10 @@ func GetColInfo(field reflect.StructField) *ColInfo {
 	}
 	return &ret
 }
-func GetTableInfoByType(typ reflect.Type) (*TableInfo, error) {
+
+var cachedTableInfo sync.Map
+
+func getTableInfoByType(typ reflect.Type) (*TableInfo, error) {
 
 	if typ.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("invalid type %s", typ.Name())
@@ -1061,10 +1074,12 @@ func GetTableInfoByType(typ reflect.Type) (*TableInfo, error) {
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
 		colInfo := GetColInfo(field)
+
 		if colInfo == nil {
 			remainFields = append(remainFields, field)
 			continue
 		}
+		colInfo.IndexOnStruct = i
 		colsProc[colInfo.Name] = i
 		table.ColInfos = append(table.ColInfos, *colInfo)
 	}
@@ -1173,9 +1188,30 @@ func GetTableInfoByType(typ reflect.Type) (*TableInfo, error) {
 		}
 
 	}
+	table.MapCols = make(map[string]*ColInfo)
+	table.AutoValueCols = make(map[string]*ColInfo)
+	for i, col := range table.ColInfos {
+		table.MapCols[col.Name] = &table.ColInfos[i]
+		if col.DefaultValue != "" {
+			table.AutoValueCols[col.Name] = &table.ColInfos[i]
+		}
+	}
+
 	return &table, nil
 }
+func GetTableInfoByType(typ reflect.Type) (*TableInfo, error) {
+	if v, ok := cachedTableInfo.Load(typ); ok {
+		return v.(*TableInfo), nil
+	}
+	table, err := getTableInfoByType(typ)
+	if err != nil {
+		return nil, err
+	}
+	cachedTableInfo.Store(typ, table)
+	return table, nil
+}
 func GetTableInfo(obj interface{}) (*TableInfo, error) {
+
 	typ := reflect.TypeOf(obj)
 	if typ.Kind() == reflect.Ptr {
 		typ = typ.Elem()
@@ -1190,6 +1226,7 @@ func GetTableInfo(obj interface{}) (*TableInfo, error) {
 	}
 	return GetTableInfoByType(typ)
 }
+
 func (c *TableInfo) GetSql(dbDriver string) []string {
 	switch dbDriver {
 	// case "mysql":
@@ -1379,4 +1416,403 @@ func getSqlOfTableInfoForPostgres(table TableInfo) []string {
 	ret = append(ret, scriptCreateRel...)
 
 	return ret
+}
+
+//==========================================================
+//==========================================================
+
+type DbCfg struct {
+	Driver   string
+	Host     string
+	Port     int
+	User     string
+	Password string
+	UseSSL   bool
+}
+
+func (cfg *DbCfg) GetDns(dbName string) string {
+	if cfg.Driver == "postgres" {
+		if dbName == "" {
+			if cfg.UseSSL {
+
+				return fmt.Sprintf("postgres://%s:%s@%s:%d/%s", cfg.User, cfg.Password, cfg.Host, cfg.Port, dbName)
+			} else {
+				return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, dbName)
+			}
+		} else {
+			if cfg.UseSSL {
+
+				return fmt.Sprintf("postgres://%s:%s@%s:%d/%s", cfg.User, cfg.Password, cfg.Host, cfg.Port, dbName)
+			} else {
+				return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, dbName)
+			}
+		}
+	} else if cfg.Driver == "mysql" {
+		if dbName == "" {
+			return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local", cfg.User, cfg.Password, cfg.Host, cfg.Port, dbName)
+		} else {
+			return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local", cfg.User, cfg.Password, cfg.Host, cfg.Port, dbName)
+		}
+	} else {
+		panic(fmt.Errorf("not support db driver %s", cfg.Driver))
+	}
+}
+
+type DbContext struct {
+	*sql.DB
+	dbDriver string
+	cfg      *DbCfg
+
+	dns string
+}
+type TenentDbContext struct {
+	*DbContext
+	dbName string
+}
+
+func NewDbContext(cfg DbCfg) *DbContext {
+	ret := DbContext{
+		dbDriver: cfg.Driver,
+		cfg:      &cfg,
+		dns:      cfg.GetDns(""),
+	}
+	return &ret
+}
+func (ctx *DbContext) Open() error {
+	db, err := sql.Open(ctx.dbDriver, ctx.dns)
+	if err != nil {
+		return err
+	}
+	ctx.DB = db
+	return nil
+}
+
+var cachedTenentDb sync.Map
+
+func (ctx *DbContext) CreateCtx(dbName string) (*TenentDbContext, error) {
+	// check cache
+
+	if ctx.cfg == nil {
+		return nil, fmt.Errorf("db config is nil")
+	}
+	ctx.Open()
+	defer ctx.Close()
+	if ctx.dbDriver == "postgres" {
+		if _, ok := cachedTenentDb.Load(dbName); !ok {
+
+			err := createPosgresDbIfNotExist(ctx, dbName)
+			if err != nil {
+				return nil, err
+			}
+			//set to cach
+			cachedTenentDb.Store(dbName, true)
+		}
+
+	}
+	ret := TenentDbContext{
+		DbContext: &DbContext{
+			dbDriver: ctx.cfg.Driver,
+			cfg:      ctx.cfg,
+			dns:      ctx.cfg.GetDns(dbName),
+		},
+		dbName: dbName,
+	}
+	return &ret, nil
+
+}
+func createPosgresDbIfNotExist(ctx *DbContext, dbName string) error {
+	var exists bool
+	err := ctx.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName).Scan(&exists)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		sqlCreate := fmt.Sprintf("CREATE DATABASE %q", dbName) // Sử dụng %q để quote tên database an toàn
+		_, err = ctx.Exec(sqlCreate)
+		if err != nil {
+			return err
+		}
+
+	}
+	dbTenant, err := sql.Open(ctx.dbDriver, ctx.cfg.GetDns(dbName))
+	if err != nil {
+		return err
+	}
+	defer dbTenant.Close()
+	// enable extension citext if not exist
+	_, err = dbTenant.Exec("CREATE EXTENSION IF NOT EXISTS citext")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+func postgresResolver(node Node, tblMap *TableMap) (Node, error) {
+	if node.Nt == TableName || node.Nt == Field {
+		node.V = "\"" + node.V + "\""
+		return node, nil
+	}
+	if node.Nt == Params {
+		node.V = "$" + node.V[1:]
+	}
+	return node, nil
+
+}
+func postgresResolverInsertSQL(sql string, tbl TableInfo) (*string, error) {
+	returnCols := []string{}
+	for _, col := range tbl.AutoValueCols {
+
+		returnCols = append(returnCols, col.Name)
+	}
+	if len(returnCols) > 0 {
+		sql += " returning " + "\"" + strings.Join(returnCols, "\",\"") + "\""
+	}
+
+	return &sql, nil
+}
+
+var postgresResolverInsertSQLfn = postgresResolverInsertSQL
+var postgresWalker = &Walker{
+	Resolver:          postgresResolver,
+	ResolverInsertSQL: &postgresResolverInsertSQLfn,
+}
+var cacheSqlInsert sync.Map
+
+type sqlDDL struct {
+	Sql      string
+	TablInfo *TableInfo
+}
+
+func (ctx *TenentDbContext) SqlInsert1(typ reflect.Type) (*sqlDDL, error) {
+
+	var walker *Walker
+	retData := &sqlDDL{}
+	if ctx.dbDriver == "postgres" {
+		walker = postgresWalker
+	} else {
+		panic(fmt.Errorf("not support db driver %s", ctx.dbDriver))
+	}
+
+	if v, ok := cacheSqlInsert.Load(typ); ok {
+		return v.(*sqlDDL), nil
+	}
+	tableInfo, err := GetTableInfoByType(typ)
+	retData.TablInfo = tableInfo
+
+	if err != nil {
+		return nil, err
+	}
+	ret := " insert into " + tableInfo.TableName + " ("
+	strFieldInsert := ""
+	strValue := ""
+	for i, col := range tableInfo.ColInfos {
+		if col.DefaultValue == "auto" {
+			continue
+		}
+		if i > 0 {
+			strFieldInsert += ","
+			strValue += ","
+		}
+		strFieldInsert += col.Name
+		strValue += "?"
+
+	}
+	ret += strFieldInsert + ") values (" + strValue + ")"
+	retSQL, err := walker.Parse(ret, nil)
+	if err != nil {
+		return nil, err
+	}
+	retData.Sql = retSQL
+	//set to cache
+	cacheSqlInsert.Store(typ, retData)
+
+	return retData, nil
+}
+
+var cachMigrate sync.Map
+
+func (ctx *TenentDbContext) Migrate(dbName string, entity interface{}) (reflect.Type, error) {
+
+	typ := reflect.TypeOf(entity)
+	if typ.Kind() == reflect.Slice {
+		typ = typ.Elem()
+	}
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	tableInfo, err := GetTableInfoByType(typ)
+	if err != nil {
+		return nil, err
+	}
+	key := dbName + "-" + typ.String()
+	if _, ok := cachMigrate.Load(key); ok {
+		return typ, nil
+	}
+	sqlCreate := tableInfo.GetSql(ctx.dbDriver)
+	if ctx.DB == nil {
+		return nil, fmt.Errorf("please open TenentDbContext first")
+	}
+	for _, sql := range sqlCreate {
+		_, err = ctx.Exec(sql)
+		if err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				continue
+			}
+			return nil, err
+		}
+	}
+	cachMigrate.Store(key, true)
+	return typ, nil
+}
+
+type sqlWithParams struct {
+	Sql    string
+	Params []interface{}
+}
+
+var mapDefaulValueOfGoType = map[reflect.Type]interface{}{
+	reflect.TypeOf(int(0)):      0,
+	reflect.TypeOf(int8(0)):     0,
+	reflect.TypeOf(int16(0)):    0,
+	reflect.TypeOf(int32(0)):    0,
+	reflect.TypeOf(int64(0)):    0,
+	reflect.TypeOf(uint(0)):     0,
+	reflect.TypeOf(uint8(0)):    0,
+	reflect.TypeOf(uint16(0)):   0,
+	reflect.TypeOf(uint32(0)):   0,
+	reflect.TypeOf(uint64(0)):   0,
+	reflect.TypeOf(float32(0)):  0,
+	reflect.TypeOf(float64(0)):  0,
+	reflect.TypeOf(bool(false)): false,
+	reflect.TypeOf(string("")):  "",
+	reflect.TypeOf(time.Time{}): time.Time{},
+	reflect.TypeOf(uuid.UUID{}): uuid.UUID{},
+}
+
+func (ctx *TenentDbContext) toArray(entity interface{}, tableInfo TableInfo) (*sqlWithParams, error) {
+	var ret = sqlWithParams{
+		Params: []interface{}{},
+	}
+	typ := reflect.TypeOf(entity)
+	val := reflect.ValueOf(entity)
+
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+		val = val.Elem()
+	}
+
+	if typ.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("not support type %s", typ.String())
+	}
+	ret.Sql = "insert into "
+	fields := []string{}
+	valParams := []string{}
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if col, ok := tableInfo.MapCols[field.Name]; ok {
+			fieldVal := val.Field(i)
+			if fieldVal.IsZero() {
+				if !col.AllowNull && col.DefaultValue != "" {
+					continue
+				}
+				if !col.AllowNull && col.DefaultValue == "" {
+					if val, ok := mapDefaulValueOfGoType[fieldVal.Type()]; ok {
+						ret.Params = append(ret.Params, val)
+						fields = append(fields, col.Name)
+						valParams = append(valParams, "?")
+					}
+				}
+
+			} else {
+				ret.Params = append(ret.Params, fieldVal.Interface())
+				fields = append(fields, col.Name)
+				valParams = append(valParams, "?")
+			}
+
+		}
+
+	}
+	ret.Sql += tableInfo.TableName + " (" + strings.Join(fields, ",") + ") values (" + strings.Join(valParams, ",") + ")"
+	return &ret, nil
+}
+func (ctx *TenentDbContext) Insert(entity interface{}) error {
+	var walker *Walker
+	if ctx.cfg.Driver == "postgres" {
+		walker = postgresWalker
+	} else {
+		panic(fmt.Errorf("not support db driver %s", ctx.cfg.Driver))
+	}
+	typ, err := ctx.Migrate(ctx.dbName, entity)
+	if err != nil {
+		return err
+	}
+	tblInfo, err := GetTableInfoByType(typ)
+	if err != nil {
+		return err
+	}
+	dataInsert, err := ctx.toArray(entity, *tblInfo)
+
+	if err != nil {
+		return err
+	}
+
+	if err != nil {
+		return err
+	}
+	if ctx.DB == nil {
+		return fmt.Errorf("please open TenentDbContext first")
+	}
+	execSql, err := walker.Parse(dataInsert.Sql, nil)
+	if walker.ResolverInsertSQL == nil {
+		return fmt.Errorf("walker.ResolverInsertSQL is not set")
+	}
+	resolverInsertSQL := *walker.ResolverInsertSQL
+
+	execSql2, err := resolverInsertSQL(execSql, *tblInfo)
+	if err != nil {
+		return err
+	}
+	resultArray := []interface{}{}
+	mapResult := map[int]string{}
+	indexOfParam := 0
+	for _, col := range tblInfo.AutoValueCols {
+		val := reflect.New(col.FieldType.Type).Interface()
+		resultArray = append(resultArray, val)
+		mapResult[indexOfParam] = col.Name
+		indexOfParam++
+	}
+
+	rs := ctx.QueryRow(*execSql2, dataInsert.Params...)
+	if rs.Err() != nil {
+		return rs.Err()
+	}
+	rs.Scan(resultArray...)
+	// re-assign to entity
+
+	for indexOfParam, _ := range mapResult {
+
+		fieldVal := reflect.ValueOf(entity).Elem().FieldByName(mapResult[indexOfParam])
+		fieldTyp := reflect.TypeOf(fieldVal.Interface())
+		if fieldTyp.Kind() == reflect.Ptr {
+			fieldTyp = fieldTyp.Elem()
+		}
+		fmt.Println(fieldVal.Type())
+
+		fmt.Println(reflect.TypeOf(resultArray[indexOfParam]))
+		rType := reflect.TypeOf(resultArray[indexOfParam])
+		if reflect.TypeOf(resultArray[indexOfParam]).Kind() == reflect.Ptr {
+			rType := rType.Elem()
+			if rType == fieldTyp {
+				fieldVal.Set(reflect.ValueOf(resultArray[indexOfParam]).Elem())
+			}
+		} else {
+			fieldVal.Set(reflect.ValueOf(resultArray[indexOfParam]))
+		}
+
+		indexOfParam++
+	}
+	if err != nil {
+		return err
+	}
+	return nil
 }
