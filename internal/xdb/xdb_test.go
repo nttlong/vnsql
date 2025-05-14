@@ -526,6 +526,15 @@ type Employee struct {
 	Profile   []*JobsProfile `db:"foreignkey:ProfileId"`
 	JobTime   time.Time
 	StartTimr time.Time
+	DeptId    *int
+}
+type Dept struct {
+	BaseInfo
+	Id       int         `db:"pk;df:auto"`
+	Name     string      `db:"idx"`
+	Code     string      `db:"unique;varchar(10)"`
+	Emps     []*Employee `db:"foreignkey:DeptId"`
+	CreateOn time.Time   `db:"default:now()"`
 }
 
 var expectValues = []string{
@@ -570,7 +579,7 @@ func TestGetTableInfoOfEntity(t *testing.T) {
 
 }
 func TestCreateSQL(t *testing.T) {
-	tbl, err := parser.GetTableInfo(&Employee{})
+	tbl, err := parser.GetTableInfo(&Dept{})
 	assert.NoError(t, err)
 	sqls := tbl.GetSql("postgres")
 	assert.NoError(t, err)

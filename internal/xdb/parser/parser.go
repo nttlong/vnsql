@@ -1242,8 +1242,14 @@ func getSqlOfTableInfoForPostgres(table TableInfo) []string {
 		//check mapGoTypeToPosgresType
 		if dbType, ok := mapGoTypeToPosgresType[ft]; ok {
 			if col.IsPrimary {
-				strCol = fmt.Sprintf("\"%s\" %s PRIMARY KEY", col.Name, dbType)
-				colsScript = append(colsScript, strCol)
+				if col.DefaultValue == "auto" && col.FieldType.Type.Kind() == reflect.Int {
+					strCol = fmt.Sprintf("\"%s\" SERIAL PRIMARY KEY", col.Name)
+					colsScript = append(colsScript, strCol)
+				} else {
+					strCol = fmt.Sprintf("\"%s\" %s PRIMARY KEY", col.Name, dbType)
+					colsScript = append(colsScript, strCol)
+				}
+
 			} else {
 
 				if col.AllowNull {
