@@ -18,6 +18,9 @@ import (
 	"github.com/nttlong/vnsql/internal/xdb/parser"
 	pgParser "github.com/nttlong/vnsql/internal/xdb/parser/postgres"
 	"github.com/stretchr/testify/assert"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 type IBaseModle interface {
@@ -629,8 +632,8 @@ func TestDbContext(t *testing.T) {
 	// })
 	n := time.Since(start).Abs().Milliseconds()
 	fmt.Println(fmt.Sprintf("elapse time: %04d", n))
-
-	for i := 70000; i < 80000; i++ {
+	totalTime := int64(0)
+	for i := 0; i < 10000; i++ {
 		start = time.Now()
 		dd := time.Now().Add(time.Hour * 24)
 		dep := Dept{
@@ -643,6 +646,7 @@ func TestDbContext(t *testing.T) {
 		err = tanetDb.Insert(&dep)
 
 		n := time.Since(start).Abs().Milliseconds()
+		totalTime += n
 		if err != nil {
 			fmt.Println(fmt.Sprintf("elapse time: %04d %s", n, err))
 		} else {
@@ -650,8 +654,73 @@ func TestDbContext(t *testing.T) {
 		}
 
 	}
-
+	avgTime := totalTime / 10000
+	fmt.Println(fmt.Sprintf("avg elapse time: %04d", avgTime))
 	assert.NoError(t, err)
 	tanetDb.Close()
 
+}
+
+type Dept2 struct {
+	Id                int        `gorm:"column:Id;primaryKey;autoIncrement"`
+	Name              string     `gorm:"column:Name;type:citext;not null"`
+	Code              string     `gorm:"column:Code;type:citext;not null;size:10"`
+	CreateOn          time.Time  `gorm:"column:CreateOn;type:timestamp without time zone;not null;default:CURRENT_TIMESTAMP"`
+	Description       string     `gorm:"column:Description;type:citext;not null;default:''"`
+	CreatedOn         time.Time  `gorm:"column:CreatedOn;type:timestamp without time zone;not null;default:CURRENT_TIMESTAMP"`
+	UpdatedOn         *time.Time `gorm:"column:UpdatedOn;type:timestamp without time zone"`
+	CreatedBy         string     `gorm:"column:CreatedBy;type:citext;not null;default:'system'"`
+	UpdatedBy         *string    `gorm:"column:UpdatedBy;type:citext"`
+	EstablishmentDate time.Time  `gorm:"column:EstablishmentDate;type:timestamp without time zone;not null;default:CURRENT_TIMESTAMP"`
+	DissolutionDate   *time.Time `gorm:"column:DissolutionDate;type:timestamp without time zone"`
+	SecretKey         uuid.UUID  `gorm:"column:SecretKey;type:uuid;not null;default:gen_random_uuid()"`
+}
+
+func TestGrmInsert(t *testing.T) {
+	cfg := parser.DbCfg{
+		Driver:   "postgres",
+		Host:     "localhost",
+		Port:     5432,
+		User:     "postgres",
+		Password: "123456",
+		UseSSL:   false,
+	}
+	dns := cfg.GetDns("db_001")
+	// You can use this struct with GORM like this:
+	db, err := gorm.Open(postgres.Open(dns), &gorm.Config{})
+	if err != nil {
+		panic("failed to connect database")
+	}
+
+	// Migrate the schema
+
+	// if err != nil {
+	// 	panic("failed to connect database")
+	// }
+
+	db.AutoMigrate(&Dept{})
+	totalTime := int64(0)
+	for i := 0; i < 10000; i++ {
+		start := time.Now()
+		dd := time.Now().Add(time.Hour * 24)
+		dep := Dept{
+			Name:              "test",
+			Code:              "test" + fmt.Sprintf("%04d", i),
+			CreatedBy:         "admin",
+			EstablishmentDate: time.Now(),
+			DissolutionDate:   &dd,
+		}
+		db.Create(&dep)
+		n := time.Since(start).Abs().Milliseconds()
+		totalTime += n
+		if err != nil {
+			fmt.Println(fmt.Sprintf("elapse time: %04d %s", n, err))
+		} else {
+			fmt.Println(fmt.Sprintf("elapse time: %04d", n))
+		}
+	}
+	avgTime := totalTime / 10000
+	fmt.Println(fmt.Sprintf("avg elapse time: %04d", avgTime))
+	// To insert data:
+	// db.Create(&Dept{Name: "Sales", Code: "SALES", Description: "Sales Department"})
 }

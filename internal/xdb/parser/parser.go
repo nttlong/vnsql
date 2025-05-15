@@ -161,7 +161,20 @@ func (w *Walker) ParseDBDLL(sql string) (DBDDLCmds, error) {
 
 }
 
+var cachSqlParse sync.Map
+
 func (w *Walker) Parse(sql string, tblMap *TableMap) (string, error) {
+	if cached, ok := cachSqlParse.Load(sql); ok {
+		return cached.(SQLParseInfo).SQL, nil
+	}
+	sql, err := w.parse(sql, tblMap)
+	if err != nil {
+		return "", err
+	}
+	cachSqlParse.Store(sql, SQLParseInfo{SQL: sql, Params: nil})
+	return sql, nil
+}
+func (w *Walker) parse(sql string, tblMap *TableMap) (string, error) {
 	sql = " " + sql
 	stm, err := sqlparser.Parse(sql)
 	if err != nil {
@@ -1735,6 +1748,7 @@ func (ctx *TenentDbContext) toArray(entity interface{}, tableInfo TableInfo) (*s
 	ret.Sql += tableInfo.TableName + " (" + strings.Join(fields, ",") + ") values (" + strings.Join(valParams, ",") + ")"
 	return &ret, nil
 }
+
 func (ctx *TenentDbContext) Insert(entity interface{}) error {
 	var walker *Walker
 	if ctx.cfg.Driver == "postgres" {
@@ -1773,46 +1787,36 @@ func (ctx *TenentDbContext) Insert(entity interface{}) error {
 		return err
 	}
 	resultArray := []interface{}{}
-	mapResult := map[int]string{}
-	indexOfParam := 0
-	for _, col := range tblInfo.AutoValueCols {
-		val := reflect.New(col.FieldType.Type).Interface()
-		resultArray = append(resultArray, val)
-		mapResult[indexOfParam] = col.Name
-		indexOfParam++
-	}
 
-	rs := ctx.QueryRow(*execSql2, dataInsert.Params...)
-	if rs.Err() != nil {
-		return rs.Err()
-	}
-	rs.Scan(resultArray...)
-	// re-assign to entity
-
-	for indexOfParam, _ := range mapResult {
-
-		fieldVal := reflect.ValueOf(entity).Elem().FieldByName(mapResult[indexOfParam])
-		fieldTyp := reflect.TypeOf(fieldVal.Interface())
-		if fieldTyp.Kind() == reflect.Ptr {
-			fieldTyp = fieldTyp.Elem()
-		}
-		fmt.Println(fieldVal.Type())
-
-		fmt.Println(reflect.TypeOf(resultArray[indexOfParam]))
-		rType := reflect.TypeOf(resultArray[indexOfParam])
-		if reflect.TypeOf(resultArray[indexOfParam]).Kind() == reflect.Ptr {
-			rType := rType.Elem()
-			if rType == fieldTyp {
-				fieldVal.Set(reflect.ValueOf(resultArray[indexOfParam]).Elem())
-			}
-		} else {
-			fieldVal.Set(reflect.ValueOf(resultArray[indexOfParam]))
-		}
-
-		indexOfParam++
-	}
+	rw, err := ctx.Query(*execSql2, dataInsert.Params...)
 	if err != nil {
 		return err
 	}
+	defer rw.Close()
+	colsVal, err := rw.Columns()
+	for _, c := range colsVal {
+		if ft, ok := tblInfo.AutoValueCols[c]; ok {
+			val := reflect.New(ft.FieldType.Type).Interface()
+			resultArray = append(resultArray, val)
+		}
+
+	}
+	for rw.Next() {
+		err = rw.Scan(resultArray...)
+		if err != nil {
+			return err
+		}
+		for i, x := range resultArray {
+			fieldName := colsVal[i]
+			fieldVal := reflect.ValueOf(entity).Elem().FieldByName(fieldName)
+			fieldVal.Set(reflect.ValueOf(x).Elem())
+
+		}
+	}
+
+	if err != nil {
+		return err
+	}
+	// fmt.Println("insert time: ", time.Now().Sub(start).Milliseconds())
 	return nil
 }
