@@ -20,6 +20,7 @@ import (
 	_ "github.com/nttlong/vnsql/types/info/infopostgres"
 )
 
+// refactor code for maintainable code
 type DbCfg struct {
 	Driver   string
 	Host     string
