@@ -1,0 +1,89 @@
+package excutorpostgres
+
+import (
+	"database/sql"
+	"fmt"
+	"reflect"
+	"strings"
+
+	_ "github.com/lib/pq"
+
+	"github.com/nttlong/vnsql/types"
+)
+
+type Executor struct {
+}
+
+func (e *Executor) CreateInsertCommand(entity interface{}, tableInfo types.TableInfo) (*types.SqlWithParams, error) {
+	var ret = types.SqlWithParams{
+		Params: []interface{}{},
+	}
+	typ := reflect.TypeOf(entity)
+	val := reflect.ValueOf(entity)
+
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+		val = val.Elem()
+	}
+
+	if typ.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("not support type %s", typ.String())
+	}
+	ret.Sql = "insert into "
+	fields := []string{}
+	valParams := []string{}
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if col, ok := tableInfo.MapCols[field.Name]; ok {
+			fieldVal := val.Field(i)
+			if fieldVal.IsZero() {
+				if !col.AllowNull && col.DefaultValue != "" {
+					continue
+				}
+				if !col.AllowNull && col.DefaultValue == "" {
+					if val, ok := types.MapDefaulValueOfGoType[fieldVal.Type()]; ok {
+						ret.Params = append(ret.Params, val)
+						fields = append(fields, col.Name)
+						valParams = append(valParams, "?")
+					}
+				}
+
+			} else {
+				ret.Params = append(ret.Params, fieldVal.Interface())
+				fields = append(fields, col.Name)
+				valParams = append(valParams, "?")
+			}
+
+		}
+
+	}
+	ret.Sql += tableInfo.TableName + " (" + strings.Join(fields, ",") + ") values (" + strings.Join(valParams, ",") + ")"
+	return &ret, nil
+}
+func (e *Executor) CreatePosgresDbIfNotExist(ctx *sql.DB, dbName string, tenantDns string) error {
+	var exists bool
+	err := ctx.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName).Scan(&exists)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		sqlCreate := fmt.Sprintf("CREATE DATABASE %q", dbName) // Sử dụng %q để quote tên database an toàn
+		_, err = ctx.Exec(sqlCreate)
+		if err != nil {
+			return err
+		}
+
+	}
+	dbTenant, err := sql.Open("postgres", tenantDns)
+	if err != nil {
+		return err
+	}
+	defer dbTenant.Close()
+	// enable extension citext if not exist
+	_, err = dbTenant.Exec("CREATE EXTENSION IF NOT EXISTS citext")
+	if err != nil {
+		return err
+	}
+	return nil
+}
