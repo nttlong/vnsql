@@ -17,7 +17,13 @@ var Walker = WalkerPostgres{&compiler.Walker{
 }}
 
 func postgresResolver(node compiler.Node, tblMap *compiler.TableMap) (compiler.Node, error) {
+
 	if node.Nt == compiler.TableName || node.Nt == compiler.Field {
+		if tblMap != nil {
+			if fn, ok := (*tblMap)[strings.ToLower(node.V)]; ok {
+				node.V = fn
+			}
+		}
 		node.V = "\"" + node.V + "\""
 		return node, nil
 	}

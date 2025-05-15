@@ -37,6 +37,7 @@ type ColInfo struct {
 	AllowNull     bool
 	DefaultValue  string
 	IndexOnStruct int
+	FieldSt       reflect.StructField
 }
 type SqlWithParams struct {
 	Sql    string

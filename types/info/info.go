@@ -94,6 +94,7 @@ func GetColInfo(field reflect.StructField) *types.ColInfo {
 		Tag:       strTags,
 		Len:       -1,
 		AllowNull: isNull,
+		FieldSt:   field,
 	}
 	tgs := strings.Split(strTags, ";")
 	for _, tg := range tgs {

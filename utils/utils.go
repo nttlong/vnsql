@@ -29,6 +29,12 @@ type DbCfg struct {
 	Password string
 	UseSSL   bool
 }
+type Model struct {
+	typ        reflect.Type
+	ctx        *TenantDbContext
+	fiter      string
+	filterArgs []interface{}
+}
 
 func (cfg *DbCfg) GetDns(dbName string) string {
 	if cfg.Driver == "postgres" {
@@ -58,6 +64,20 @@ func (cfg *DbCfg) GetDns(dbName string) string {
 	}
 }
 
+type CtxResult struct {
+	sql.Result
+}
+
+func (r *CtxResult) String() string {
+	lastInsertedId, errLastInsertedId := r.Result.LastInsertId()
+	rowsAffected, errRowsAffected := r.RowsAffected()
+	if errLastInsertedId != nil || errRowsAffected != nil {
+		return fmt.Sprintf("last insert id: %v, rows affected: %v", errLastInsertedId, errRowsAffected)
+	}
+	return fmt.Sprintf("last insert id: %d, rows affected: %d", lastInsertedId, rowsAffected)
+
+}
+
 type DbContext struct {
 	*sql.DB
 	dbDriver string
@@ -65,7 +85,7 @@ type DbContext struct {
 
 	dns string
 }
-type TenentDbContext struct {
+type TenantDbContext struct {
 	*DbContext
 	dbName string
 }
@@ -104,7 +124,7 @@ func GetExcutor(dbDriver string) types.IExecutor {
 	panic(fmt.Errorf("not support db driver %s", dbDriver))
 }
 
-func (ctx *TenentDbContext) Migrate(entity interface{}) (reflect.Type, error) {
+func (ctx *TenantDbContext) Migrate(entity interface{}) (reflect.Type, error) {
 
 	typ := reflect.TypeOf(entity)
 	if typ.Kind() == reflect.Slice {
@@ -138,7 +158,7 @@ func (ctx *TenentDbContext) Migrate(entity interface{}) (reflect.Type, error) {
 	cachMigrate.Store(key, true)
 	return typ, nil
 }
-func (ctx *DbContext) CreateCtx(dbName string) (*TenentDbContext, error) {
+func (ctx *DbContext) CreateCtx(dbName string) (*TenantDbContext, error) {
 	// check cache
 
 	if ctx.cfg == nil {
@@ -158,7 +178,7 @@ func (ctx *DbContext) CreateCtx(dbName string) (*TenentDbContext, error) {
 		}
 
 	}
-	ret := TenentDbContext{
+	ret := TenantDbContext{
 		DbContext: &DbContext{
 			dbDriver: ctx.cfg.Driver,
 			cfg:      ctx.cfg,
@@ -169,7 +189,7 @@ func (ctx *DbContext) CreateCtx(dbName string) (*TenentDbContext, error) {
 	return &ret, nil
 
 }
-func (ctx *TenentDbContext) Insert(entity interface{}) error {
+func (ctx *TenantDbContext) Insert(entity interface{}) error {
 	var walker *compiler.Walker
 	if ctx.cfg.Driver == "postgres" {
 		walker = compilerpostgres.Walker.Walker
@@ -239,4 +259,204 @@ func (ctx *TenentDbContext) Insert(entity interface{}) error {
 	}
 	// fmt.Println("insert time: ", time.Now().Sub(start).Milliseconds())
 	return nil
+}
+
+func getSqlSelect(typ reflect.Type) (*string, error) {
+	tblInfo, err := info.GetTableInfoByType(typ)
+	if err != nil {
+		return nil, err
+	}
+	field := []string{}
+	for _, col := range tblInfo.ColInfos {
+		field = append(field, col.Name)
+	}
+	selectFields := strings.Join(field, ",")
+	ret := fmt.Sprintf("select %s from %s", selectFields, typ.Name())
+	return &ret, nil
+
+}
+func scanRowToStruct(rows *sql.Rows, dest interface{}) error {
+	destType := reflect.TypeOf(dest)
+	destValue := reflect.ValueOf(dest)
+
+	if destType.Kind() != reflect.Ptr || destValue.IsNil() {
+		return fmt.Errorf("destination must be a non-nil pointer to a struct")
+	}
+
+	structType := destType.Elem()
+	if structType.Kind() != reflect.Struct {
+		return fmt.Errorf("destination must be a pointer to a struct")
+	}
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+
+	scanArgs := make([]interface{}, len(columns))
+	fields := make([]reflect.Value, len(columns))
+
+	for i, col := range columns {
+		field := destValue.Elem().FieldByNameFunc(func(fieldName string) bool {
+			return strings.EqualFold(fieldName, col) // Tìm field theo tên cột (không phân biệt hoa thường)
+		})
+		if field.IsValid() && field.CanSet() {
+			fields[i] = field
+			scanArgs[i] = field.Addr().Interface()
+		} else {
+			// Nếu không tìm thấy field phù hợp, vẫn cần một nơi để scan giá trị
+			var dummy interface{}
+			scanArgs[i] = &dummy
+		}
+	}
+
+	err = rows.Scan(scanArgs...)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+func (ctx *TenantDbContext) Find(args ...interface{}) error {
+	filterExr := ""
+	var walker *compiler.Walker
+	if ctx.cfg.Driver == "postgres" {
+		walker = compilerpostgres.Walker.Walker
+	} else {
+		panic(fmt.Errorf("not support db driver %s", ctx.cfg.Driver))
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("args is nil")
+	}
+	if len(args) > 1 {
+		filterExr = args[1].(string)
+		args = args[:1]
+	}
+
+	entity := args[0]
+	typ, err := ctx.Migrate(entity)
+	if err != nil {
+		return err
+	}
+
+	if ctx.DB == nil {
+		return fmt.Errorf("please open TenentDbContext first")
+	}
+	if filterExr == "" {
+		return fmt.Errorf("filter is nil")
+	}
+	// sql := "select * from " + typ.Name() + " where " + filterExr
+	sqlSelect, err := getSqlSelect(typ)
+	if err != nil {
+		return err
+	}
+	sql := *sqlSelect + " where " + filterExr
+	tblMap, err := getTableMap(typ)
+	if err != nil {
+		return err
+	}
+
+	if err != nil {
+		return err
+	}
+	execSQl, err := walker.Parse(sql, tblMap)
+	if err != nil {
+		return err
+	}
+
+	rows, err := ctx.Query(execSQl, args...)
+	if err != nil {
+		return err
+	}
+	if rows.Err() != nil {
+		return rows.Err()
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+
+		err := scanRowToStruct(rows, entity)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	return nil
+
+}
+func (ctx *TenantDbContext) Delete(entity interface{}) error {
+
+	panic("not implement")
+}
+
+func (ctx *TenantDbContext) Model(entity interface{}) *Model {
+	ctx.Migrate(entity)
+	typ := reflect.TypeOf(entity)
+	if typ.Kind() == reflect.Slice {
+		typ = typ.Elem()
+	}
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	return &Model{
+		typ: typ,
+		ctx: ctx,
+	}
+}
+func (m *Model) Filter(filterExr string, args ...interface{}) *Model {
+	m.filterArgs = args
+	m.fiter = filterExr
+	return m
+}
+
+var tabbMap sync.Map
+
+func getTableMap(typ reflect.Type) (*compiler.TableMap, error) {
+	if v, ok := tabbMap.Load(typ); ok {
+		return v.(*compiler.TableMap), nil
+	}
+	tblInfo, err := info.GetTableInfoByType(typ)
+	if err != nil {
+		return nil, err
+	}
+
+	tableMap := compiler.TableMap{}
+	for _, col := range tblInfo.ColInfos {
+		tableMap[strings.ToLower(col.Name)] = col.Name
+	}
+	tabbMap.Store(typ, &tableMap)
+	return &tableMap, nil
+}
+
+func (m *Model) Update(updateExr string, args ...interface{}) (*CtxResult, error) {
+	var walker *compiler.Walker
+	if m.ctx.cfg.Driver == "postgres" {
+		walker = compilerpostgres.Walker.Walker
+	} else {
+		panic(fmt.Errorf("not support db driver %s", m.ctx.cfg.Driver))
+	}
+	if m.ctx.DB == nil {
+		return nil, fmt.Errorf("please open TenentDbContext first")
+	}
+	if m.fiter == "" {
+		return nil, fmt.Errorf("filter is nil")
+	}
+	sql := fmt.Sprintf("update %s set %s where %s", m.typ.Name(), updateExr, m.fiter)
+	tableMap, err := getTableMap(m.typ)
+	if err != nil {
+		return nil, err
+	}
+	execSQl, err := walker.Parse(sql, tableMap)
+	if err != nil {
+		return nil, err
+	}
+	sqlArg := append(m.filterArgs, args...)
+	ret, err := m.ctx.Exec(execSQl, sqlArg...)
+	if err != nil {
+		return nil, err
+	}
+	return &CtxResult{
+		Result: ret,
+	}, nil
 }

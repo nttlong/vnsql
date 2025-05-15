@@ -58,7 +58,7 @@ type UsingNodeOnDelete struct {
 	TargetTable string
 	ReNewSQL    string
 }
-type TableMap map[string]map[string]string
+type TableMap map[string]string
 type DBDDLCommand struct {
 	DbName      *string
 	CommandText *string
@@ -662,14 +662,15 @@ func (w *Walker) walkOnUpdate(stmt *sqlparser.Update, tblMap *TableMap) (string,
 		}
 		ret = append(ret, colName+" = "+colValue)
 	}
+	where := ""
 	if stmt.Where != nil {
-		where, err := w.walkSQLNode(stmt.Where, tblMap)
+		where, err = w.walkSQLNode(stmt.Where, tblMap)
 		if err != nil {
 			return "", err
 		}
-		ret = append(ret, "WHERE "+where)
+
 	}
-	return "UPDATE " + tableName + " SET " + strings.Join(ret, ", "), nil
+	return "UPDATE " + tableName + " SET " + strings.Join(ret, ", ") + " WHERE " + where, nil
 
 }
 func (w *Walker) walkOnDelete(stmt *sqlparser.Delete, tblMap *TableMap) (string, error) {
