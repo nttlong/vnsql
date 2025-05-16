@@ -1,0 +1,10 @@
+// package vnsql
+
+// import (
+// 	"github.com/nttlong/vnsql/utils"
+// 	_ "github.com/nttlong/vnsql/utils"
+// )
+
+// type DbContext struct {
+// 	utils.DbContext
+// }

@@ -14,7 +14,24 @@ import (
 type Executor struct {
 }
 
+//var cacheSqlWithParams sync.Map
+
 func (e *Executor) CreateInsertCommand(entity interface{}, tableInfo types.TableInfo) (*types.SqlWithParams, error) {
+	// if v, ok := cacheSqlWithParams.Load(tableInfo.TableName); ok {
+	// 	return v.(*types.SqlWithParams), nil
+	// }
+	// start := time.Now()
+
+	sqlWithParams, err := e.createInsertCommand(entity, tableInfo)
+	// fmt.Println("CreateInsertCommand time Nanoseconds: ", time.Since(start).Nanoseconds())
+	if err != nil {
+		return nil, err
+	}
+	// cacheSqlWithParams.Store(tableInfo.TableName, sqlWithParams)
+	return sqlWithParams, nil
+
+}
+func (e *Executor) createInsertCommand(entity interface{}, tableInfo types.TableInfo) (*types.SqlWithParams, error) {
 	var ret = types.SqlWithParams{
 		Params: []interface{}{},
 	}

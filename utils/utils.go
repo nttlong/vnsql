@@ -133,6 +133,16 @@ func (ctx *TenantDbContext) Migrate(entity interface{}) (reflect.Type, error) {
 	if typ.Kind() == reflect.Ptr {
 		typ = typ.Elem()
 	}
+	if typ.Kind() == reflect.Slice {
+		typ = typ.Elem()
+	}
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
 	tableInfo, err := info.GetTableInfoByType(typ)
 	if err != nil {
 		return nil, err
@@ -226,32 +236,36 @@ func (ctx *TenantDbContext) Insert(entity interface{}) error {
 	if err != nil {
 		return err
 	}
-	resultArray := []interface{}{}
+	// resultArray := []interface{}{}
 
 	rw, err := ctx.Query(*execSql2, dataInsert.Params...)
 	if err != nil {
 		return err
 	}
 	defer rw.Close()
-	colsVal, err := rw.Columns()
-	for _, c := range colsVal {
-		if ft, ok := tblInfo.AutoValueCols[c]; ok {
-			val := reflect.New(ft.FieldType.Type).Interface()
-			resultArray = append(resultArray, val)
-		}
+	// colsVal, err := rw.Columns()
+	// for _, c := range colsVal {
+	// 	if ft, ok := tblInfo.AutoValueCols[c]; ok {
+	// 		val := reflect.New(ft.FieldType.Type).Interface()
+	// 		resultArray = append(resultArray, val)
+	// 	}
 
-	}
+	// }
 	for rw.Next() {
-		err = rw.Scan(resultArray...)
+		err := scanRowToStruct(rw, entity) // thay may cai vong lap o duoi ban ham nay chay OK
 		if err != nil {
 			return err
 		}
-		for i, x := range resultArray {
-			fieldName := colsVal[i]
-			fieldVal := reflect.ValueOf(entity).Elem().FieldByName(fieldName)
-			fieldVal.Set(reflect.ValueOf(x).Elem())
+		// err = rw.Scan(resultArray...)
+		// if err != nil {
+		// 	return err
+		// }
+		// for i, x := range resultArray {
+		// 	fieldName := colsVal[i]
+		// 	fieldVal := reflect.ValueOf(entity).Elem().FieldByName(fieldName)
+		// 	fieldVal.Set(reflect.ValueOf(x).Elem())
 
-		}
+		// }
 	}
 
 	if err != nil {
@@ -297,9 +311,8 @@ func scanRowToStruct(rows *sql.Rows, dest interface{}) error {
 	fields := make([]reflect.Value, len(columns))
 
 	for i, col := range columns {
-		field := destValue.Elem().FieldByNameFunc(func(fieldName string) bool {
-			return strings.EqualFold(fieldName, col) // Tìm field theo tên cột (không phân biệt hoa thường)
-		})
+		field := destValue.Elem().FieldByName(col)
+		// chac chan la tim duoc vi sau sql select duoc sinh ra tu cac field cua struct
 		if field.IsValid() && field.CanSet() {
 			fields[i] = field
 			scanArgs[i] = field.Addr().Interface()
@@ -317,23 +330,15 @@ func scanRowToStruct(rows *sql.Rows, dest interface{}) error {
 
 	return nil
 }
-func (ctx *TenantDbContext) Find(args ...interface{}) error {
-	filterExr := ""
+func (ctx *TenantDbContext) Find(entity interface{}, filterExr string, args ...interface{}) error {
+
 	var walker *compiler.Walker
 	if ctx.cfg.Driver == "postgres" {
 		walker = compilerpostgres.Walker.Walker
 	} else {
 		panic(fmt.Errorf("not support db driver %s", ctx.cfg.Driver))
 	}
-	if len(args) == 0 {
-		return fmt.Errorf("args is nil")
-	}
-	if len(args) > 1 {
-		filterExr = args[1].(string)
-		args = args[:1]
-	}
 
-	entity := args[0]
 	typ, err := ctx.Migrate(entity)
 	if err != nil {
 		return err
@@ -350,7 +355,7 @@ func (ctx *TenantDbContext) Find(args ...interface{}) error {
 	if err != nil {
 		return err
 	}
-	sql := *sqlSelect + " where " + filterExr
+	sql := *sqlSelect + " where " + filterExr // cau sql chua chay duoc tren datbase server thuc
 	tblMap, err := getTableMap(typ)
 	if err != nil {
 		return err
@@ -359,7 +364,11 @@ func (ctx *TenantDbContext) Find(args ...interface{}) error {
 	if err != nil {
 		return err
 	}
+	/**
+	Ham walker.Parse chuyen doi cau sql sang dung voi cau sql thuc te chay tren database
+	*/
 	execSQl, err := walker.Parse(sql, tblMap)
+
 	if err != nil {
 		return err
 	}
@@ -372,16 +381,46 @@ func (ctx *TenantDbContext) Find(args ...interface{}) error {
 		return rows.Err()
 	}
 	defer rows.Close()
+	// entityType := reflect.TypeOf(entity)
+	//entityType := reflect.TypeOf(entity)
+	entityValue := reflect.ValueOf(entity)
+	//fmt.Println(entityType.Kind())
 
+	// if entityType.Kind() != reflect.Ptr || entityType.Elem().Kind() != reflect.Slice {
+
+	// 	return fmt.Errorf("entity must be a pointer to a slice %s example []*Vector", entityType.Kind())
+	// }
+	sliceValue := entityValue
+	sliceValue = entityValue.Elem()
+	// fmt.Println(sliceValue.Kind())
+	// Tạo một phần tử mới (zero value của kiểu phần tử)
+
+	// Hoặc nếu bạn có một giá trị cụ thể muốn append:
+	// newElementValue := reflect.ValueOf(yourNewStruct)
+	// if newElementValue.Type() != elementType {
+	// 	fmt.Println("Type of new element does not match the slice element type")
+	// 	return
+	// }
+	// newElement = newElementValue
+
+	// Append phần tử mới vào slice
+	// start := time.Now()
 	for rows.Next() {
 
-		err := scanRowToStruct(rows, entity)
+		//rEntity := reflect.New(typ).Interface()
+		newElement := reflect.New(typ).Interface()
+
+		err := scanRowToStruct(rows, newElement)
 		if err != nil {
 			return err
 		}
 
+		sliceValue = reflect.Append(sliceValue, reflect.ValueOf(newElement))
+
 	}
 
+	entityValue.Elem().Set(sliceValue)
+	// fmt.Println("find time: ", time.Now().Sub(start).Milliseconds())
 	return nil
 
 }
