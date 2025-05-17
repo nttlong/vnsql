@@ -9,15 +9,15 @@ import (
 
 	_ "github.com/lib/pq"
 	"github.com/nttlong/vnsql/compiler"
-	"github.com/nttlong/vnsql/compiler/compilerpostgres"
-	"github.com/nttlong/vnsql/excutor/excutorpostgres"
-	_ "github.com/nttlong/vnsql/excutor/excutorpostgres"
+	"github.com/nttlong/vnsql/compiler/compiler_postgres"
+	"github.com/nttlong/vnsql/excutor/executor_postgres"
+	_ "github.com/nttlong/vnsql/excutor/executor_postgres"
 	"github.com/nttlong/vnsql/types"
 	_ "github.com/nttlong/vnsql/types"
 	"github.com/nttlong/vnsql/types/info"
 	_ "github.com/nttlong/vnsql/types/info"
-	"github.com/nttlong/vnsql/types/info/infopostgres"
-	_ "github.com/nttlong/vnsql/types/info/infopostgres"
+	"github.com/nttlong/vnsql/types/info/info_postgres"
+	_ "github.com/nttlong/vnsql/types/info/info_postgres"
 )
 
 // refactor code for maintainable code
@@ -107,18 +107,30 @@ func (ctx *DbContext) Open() error {
 	return nil
 }
 
-var cachedTenentDb sync.Map
-var cachMigrate sync.Map
-var cachGetExcutor sync.Map
+var cachedTenantDb sync.Map
+var cacheMigrate sync.Map
+var cacheGetExecutor sync.Map
+var entitiesCache map[string]*types.TableInfo = make(map[string]*types.TableInfo)
 
-func GetExcutor(dbDriver string) types.IExecutor {
-	if v, ok := cachGetExcutor.Load(dbDriver); ok {
+func RegisterEntity(entity ...interface{}) error {
+	for _, e := range entity {
+		tblInfo, err := info.GetTableInfo(e)
+		if err != nil {
+			return err
+		}
+		entitiesCache[strings.ToLower(tblInfo.TableName)] = tblInfo
+	}
+	return nil
+}
+
+func GetExecutor(dbDriver string) types.IExecutor {
+	if v, ok := cacheGetExecutor.Load(dbDriver); ok {
 		return v.(types.IExecutor)
 	}
 	if dbDriver == "postgres" {
 
-		ret := &excutorpostgres.Executor{}
-		cachGetExcutor.Store(dbDriver, ret)
+		ret := &executor_postgres.Executor{}
+		cacheGetExecutor.Store(dbDriver, ret)
 		return ret
 	}
 	panic(fmt.Errorf("not support db driver %s", dbDriver))
@@ -149,15 +161,15 @@ func (ctx *TenantDbContext) Migrate(entity interface{}) (reflect.Type, error) {
 	}
 
 	key := ctx.dbName + "-" + typ.String()
-	if _, ok := cachMigrate.Load(key); ok {
+	if _, ok := cacheMigrate.Load(key); ok {
 		return typ, nil
 	}
-	sqlCreate := infopostgres.GetSqlOfTableInfoForPostgres(*tableInfo)
+	sqlCreate := info_postgres.GetSqlOfTableInfoForPostgres(*tableInfo, nil)
 	if ctx.DB == nil {
 		return nil, fmt.Errorf("please open TenentDbContext first")
 	}
 	for _, sql := range sqlCreate {
-		_, err = ctx.Exec(sql)
+		_, err = ctx.DB.Exec(sql)
 		if err != nil {
 			if strings.Contains(err.Error(), "already exists") {
 				continue
@@ -165,29 +177,63 @@ func (ctx *TenantDbContext) Migrate(entity interface{}) (reflect.Type, error) {
 			return nil, err
 		}
 	}
-	cachMigrate.Store(key, true)
+	cacheMigrate.Store(key, true)
 	return typ, nil
 }
+
 func (ctx *DbContext) CreateCtx(dbName string) (*TenantDbContext, error) {
 	// check cache
 
 	if ctx.cfg == nil {
 		return nil, fmt.Errorf("db config is nil")
 	}
-	ctx.Open()
+	if ctx.DB == nil {
+		return nil, fmt.Errorf("please open DbContext first")
+	}
 	defer ctx.Close()
 	if ctx.dbDriver == "postgres" {
-		if _, ok := cachedTenentDb.Load(dbName); !ok {
+		if _, ok := cachedTenantDb.Load(dbName); !ok {
 
-			err := GetExcutor(ctx.dbDriver).CreatePosgresDbIfNotExist(ctx.DB, dbName, ctx.cfg.GetDns(dbName))
+			err := GetExecutor(ctx.dbDriver).CreatePostgresDbIfNotExist(ctx.DB, dbName, ctx.cfg.GetDns(dbName))
 			if err != nil {
 				return nil, err
 			}
+			//cache all tablename and column name
+
 			//set to cach
-			cachedTenentDb.Store(dbName, true)
+			cachedTenantDb.Store(dbName, true)
 		}
 
 	}
+	migrateDb, err := sql.Open(ctx.dbDriver, ctx.cfg.GetDns(dbName))
+	if err != nil {
+		return nil, err
+	}
+	defer migrateDb.Close()
+	tblMap, err := GetExecutor(ctx.dbDriver).GetTableInfoFormDb(migrateDb, dbName)
+	if err != nil {
+		return nil, err
+	}
+	tblInTableMap := *tblMap
+	for _, v := range entitiesCache {
+
+		if tblInMap, ok := tblInTableMap[strings.ToLower(v.TableName)]; ok {
+			tblInMap.EntityType = v.EntityType
+		}
+		sqlCreate := info_postgres.GetSqlOfTableInfoForPostgres(*v, tblMap)
+		for _, sql := range sqlCreate {
+			_, err = migrateDb.Exec(sql)
+			if err != nil {
+				if strings.Contains(err.Error(), "already exists") {
+					continue
+				}
+				return nil, err
+			}
+			fmt.Println(sql)
+		}
+
+	}
+
 	ret := TenantDbContext{
 		DbContext: &DbContext{
 			dbDriver: ctx.cfg.Driver,
@@ -199,10 +245,17 @@ func (ctx *DbContext) CreateCtx(dbName string) (*TenantDbContext, error) {
 	return &ret, nil
 
 }
-func (ctx *TenantDbContext) Insert(entity interface{}) error {
-	var walker *compiler.Walker
+func (ctx *TenantDbContext) getCompiler() *compiler.Compiler {
 	if ctx.cfg.Driver == "postgres" {
-		walker = compilerpostgres.Walker.Walker
+		return compiler_postgres.Compiler.Compiler
+	} else {
+		panic(fmt.Errorf("not support db driver %s", ctx.cfg.Driver))
+	}
+}
+func (ctx *TenantDbContext) Insert(entity interface{}) error {
+	var walker *compiler.Compiler
+	if ctx.cfg.Driver == "postgres" {
+		walker = compiler_postgres.Compiler.Compiler
 	} else {
 		panic(fmt.Errorf("not support db driver %s", ctx.cfg.Driver))
 	}
@@ -214,7 +267,7 @@ func (ctx *TenantDbContext) Insert(entity interface{}) error {
 	if err != nil {
 		return err
 	}
-	dataInsert, err := GetExcutor(ctx.dbDriver).CreateInsertCommand(entity, *tblInfo)
+	dataInsert, err := GetExecutor(ctx.dbDriver).CreateInsertCommand(entity, *tblInfo)
 
 	if err != nil {
 		return err
@@ -224,21 +277,25 @@ func (ctx *TenantDbContext) Insert(entity interface{}) error {
 		return err
 	}
 	if ctx.DB == nil {
-		return fmt.Errorf("please open TenentDbContext first")
+		return fmt.Errorf("please open TenantDbContext first")
 	}
-	execSql, err := walker.Parse(dataInsert.Sql, nil)
-	if walker.ResolverInsertSQL == nil {
-		return fmt.Errorf("walker.ResolverInsertSQL is not set")
+	// dbTableInfo, err := ctx.GetTableMappingFromDb()
+	if err != nil {
+		return err
 	}
-	resolverInsertSQL := walker.ResolverInsertSQL
+	execSql, err := walker.Parse(dataInsert.Sql)
+	// if walker.ResolverInsertSQL == nil {
+	// 	return fmt.Errorf("walker.ResolverInsertSQL is not set")
+	// }
+	// resolverInsertSQL := walker.ResolverInsertSQL
 
-	execSql2, err := resolverInsertSQL(execSql, *tblInfo)
+	// execSql2, err := resolverInsertSQL(execSql, *tblInfo)
 	if err != nil {
 		return err
 	}
 	// resultArray := []interface{}{}
 
-	rw, err := ctx.Query(*execSql2, dataInsert.Params...)
+	rw, err := ctx.Query(execSql, dataInsert.Params...)
 	if err != nil {
 		return err
 	}
@@ -274,7 +331,29 @@ func (ctx *TenantDbContext) Insert(entity interface{}) error {
 	// fmt.Println("insert time: ", time.Now().Sub(start).Milliseconds())
 	return nil
 }
+func (ctx *TenantDbContext) Exec(query string, args ...interface{}) (*CtxResult, error) {
+	compiler := ctx.getCompiler()
+	// tblMap, err := ctx.GetTableMappingFromDb()
 
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	execSql, err := compiler.Parse(query)
+	if err != nil {
+		return nil, err
+	}
+	if ctx.DB == nil {
+		return nil, fmt.Errorf("please open TenantDbContext first")
+	}
+	ret, err := ctx.DB.Exec(execSql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return &CtxResult{
+		Result: ret,
+	}, nil
+}
 func getSqlSelect(typ reflect.Type) (*string, error) {
 	tblInfo, err := info.GetTableInfoByType(typ)
 	if err != nil {
@@ -332,9 +411,9 @@ func scanRowToStruct(rows *sql.Rows, dest interface{}) error {
 }
 func (ctx *TenantDbContext) Find(entity interface{}, filterExr string, args ...interface{}) error {
 
-	var walker *compiler.Walker
+	var walker *compiler.Compiler
 	if ctx.cfg.Driver == "postgres" {
-		walker = compilerpostgres.Walker.Walker
+		walker = compiler_postgres.Compiler.Compiler
 	} else {
 		panic(fmt.Errorf("not support db driver %s", ctx.cfg.Driver))
 	}
@@ -356,7 +435,7 @@ func (ctx *TenantDbContext) Find(entity interface{}, filterExr string, args ...i
 		return err
 	}
 	sql := *sqlSelect + " where " + filterExr // cau sql chua chay duoc tren datbase server thuc
-	tblMap, err := getTableMap(typ)
+	// tblMap, err := getTableMap(typ)
 	if err != nil {
 		return err
 	}
@@ -367,7 +446,7 @@ func (ctx *TenantDbContext) Find(entity interface{}, filterExr string, args ...i
 	/**
 	Ham walker.Parse chuyen doi cau sql sang dung voi cau sql thuc te chay tren database
 	*/
-	execSQl, err := walker.Parse(sql, tblMap)
+	execSQl, err := walker.Parse(sql)
 
 	if err != nil {
 		return err
@@ -469,9 +548,9 @@ func getTableMap(typ reflect.Type) (*compiler.TableMap, error) {
 }
 
 func (m *Model) Update(updateExr string, args ...interface{}) (*CtxResult, error) {
-	var walker *compiler.Walker
+	var walker *compiler.Compiler
 	if m.ctx.cfg.Driver == "postgres" {
-		walker = compilerpostgres.Walker.Walker
+		walker = compiler_postgres.Compiler.Compiler
 	} else {
 		panic(fmt.Errorf("not support db driver %s", m.ctx.cfg.Driver))
 	}
@@ -482,11 +561,11 @@ func (m *Model) Update(updateExr string, args ...interface{}) (*CtxResult, error
 		return nil, fmt.Errorf("filter is nil")
 	}
 	sql := fmt.Sprintf("update %s set %s where %s", m.typ.Name(), updateExr, m.fiter)
-	tableMap, err := getTableMap(m.typ)
-	if err != nil {
-		return nil, err
-	}
-	execSQl, err := walker.Parse(sql, tableMap)
+	// tableMap, err := getTableMap(m.typ)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	execSQl, err := walker.Parse(sql)
 	if err != nil {
 		return nil, err
 	}
@@ -498,4 +577,11 @@ func (m *Model) Update(updateExr string, args ...interface{}) (*CtxResult, error
 	return &CtxResult{
 		Result: ret,
 	}, nil
+}
+
+// get all table and its column from database
+// return a map[tableName]map[columnName]columnType
+func (ctx *TenantDbContext) GetTableMappingFromDb() (*types.TableMapping, error) {
+	executor := GetExecutor(ctx.dbDriver)
+	return executor.GetTableInfoFormDb(ctx.DB, ctx.dbName)
 }

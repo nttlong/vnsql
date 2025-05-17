@@ -2,16 +2,25 @@ package vnsql_test
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/nttlong/vnsql/types/info"
 	"github.com/nttlong/vnsql/utils"
 	_ "github.com/nttlong/vnsql/utils"
 	"github.com/stretchr/testify/assert"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
+
+type UserInfo struct {
+	Id       string  `db:"pk;varchar(36)"`
+	Username string  `db:"unique;idx;varchar(100)"`
+	Password string  `db:"varchar(100)"`
+	Email    *string `db:"unique;idx;varchar(100)"`
+	Phone    *string `db:"varchar(20)"`
+	BaseInfo
+	Employee *EmployeeInfo `db:"foreignkey:AccountId"`
+}
 
 type JobsProfile struct {
 	ProfileId   int `db:"pk"`
@@ -22,60 +31,78 @@ type JobsProfile struct {
 	OrderId     int32   `db:"df:auto"`
 }
 type BaseInfo struct {
-	CreatedOn time.Time
-	UpdatedOn time.Time
+	CreatedOn   time.Time `db:"default:now()"`
+	CreatedBy   string    `db:"default:'system';idx;varchar(100)"`
+	UpdatedBy   *string   `db:"idx;varchar(100)"`
+	UpdatedOn   *time.Time
+	Description *string
 }
-type Employee struct {
+type PersonalInfo struct {
+	Id        int    `db:"pk;df:auto"`
+	FirstName string `db:"varchar(100);idx"`
+	LastName  string `db:"varchar(100);idx"`
+	Birthday  time.Time
+	Gender    string        `db:"varchar(10)"`
+	Email     string        `db:"unique;varchar(100)"`
+	Phone     string        `db:"varchar(20)"`
+	Employee  *EmployeeInfo `db:"foreignkey:Id"`
+	LegalInfo *LegalInfo    `db:"foreignkey:Id"`
+	BaseInfo
+}
+type IDCardInfo struct {
+	IdCard  string `db:"unique;varchar(50)"`
+	IssueOn time.Time
+	IssueBy string `db:"varchar(100)"`
+}
+type LegalInfo struct {
+	Id int `db:"pk;"`
+	IDCardInfo
+	OfficialResidence string `db:"varchar(300)"`
+}
+
+//	type CandidateInfo struct {
+//		Persion   *PersonalInfo `db:"foreignkey:Id"`
+//		LegalInfo *LegalInfo    `db:"foreignkey:Id"`
+//		Id        int           `db:"pk"`
+//		Title     string        `db:"varchar(100)"`
+//	}
+type EmployeeInfo struct {
 	BaseInfo
 
-	Id        int    `db:"pk"`
-	Name      string `db:"idx"`
-	Code      string `db:"unique;varchar(10)"`
-	Col1      *string
-	Guild     uuid.UUID
-	Guild1    *uuid.UUID
-	TimeCol   time.Time
-	TimeCol1  *time.Time
-	ColIndex1 int            `db:"index:idx1"`
-	ColIndex2 *time.Time     `db:"index:idx1"`
-	COlUUID   *uuid.UUID     `db:"index:idx1"`
-	Profile   []*JobsProfile `db:"foreignkey:ProfileId"`
-	JobTime   time.Time
-	StartTimr time.Time
-	DeptId    *int
+	Id   int    `db:"pk;"`
+	Code string `db:"unique;varchar(10)"`
+
+	Profile []*JobsProfile `db:"foreignkey:ProfileId"`
+
+	DeptId *int
+
+	JointDate time.Time  `db:"idx"`
+	QuitDate  *time.Time `db:"idx"`
+	AccountId *string    `db:"unique;idx;varchar(36)"`
 }
 type Dept struct {
 	BaseInfo
-	Id                int         `db:"pk;df:auto"`
-	Name              string      `db:"idx"`
-	Code              string      `db:"unique;varchar(10)"`
-	Emps              []*Employee `db:"foreignkey:DeptId"`
-	CreateOn          time.Time   `db:"default:now()"`
-	Description       string      `db:"df:''"`
-	CreatedOn         time.Time   `db:"default:now()"`
-	UpdatedOn         *time.Time
-	CreatedBy         string     `db:"default:'system';idx"`
-	UpdatedBy         *string    `db:"idx"`
-	EstablishmentDate time.Time  `db:"idx;df:now()"`
-	DissolutionDate   *time.Time `db:"idx"`
-	SecretKey         uuid.UUID  `db:"default:gen_random_uuid()"`
+	Id              int             `db:"pk;df:auto"`
+	Name            string          `db:"idx"`
+	Code            string          `db:"unique;varchar(10)"`
+	Emps            []*EmployeeInfo `db:"foreignkey:DeptId"`
+	DecisionDate    *time.Time      `db:"idx"`
+	DecisionNo      *string         `db:"idx''"`
+	DissolutionDate *time.Time      `db:"idx"`
+	ParentId        *int            `db:"idx"`
+	LevelCode       string          `db:"varchar(512)"`
+	ManagerId       *int
 }
-type Dept2 struct {
-	Id                int        `gorm:"column:Id;primaryKey;autoIncrement"`
-	Name              string     `gorm:"column:Name;type:citext;not null"`
-	Code              string     `gorm:"column:Code;type:citext;not null;size:10"`
-	CreateOn          time.Time  `gorm:"column:CreateOn;type:timestamp without time zone;not null;default:CURRENT_TIMESTAMP"`
-	Description       string     `gorm:"column:Description;type:citext;not null;default:''"`
-	CreatedOn         time.Time  `gorm:"column:CreatedOn;type:timestamp without time zone;not null;default:CURRENT_TIMESTAMP"`
-	UpdatedOn         *time.Time `gorm:"column:UpdatedOn;type:timestamp without time zone"`
-	CreatedBy         string     `gorm:"column:CreatedBy;type:citext;not null;default:'system'"`
-	UpdatedBy         *string    `gorm:"column:UpdatedBy;type:citext"`
-	EstablishmentDate time.Time  `gorm:"column:EstablishmentDate;type:timestamp without time zone;not null;default:CURRENT_TIMESTAMP"`
-	DissolutionDate   *time.Time `gorm:"column:DissolutionDate;type:timestamp without time zone"`
-	SecretKey         uuid.UUID  `gorm:"column:SecretKey;type:uuid;not null;default:gen_random_uuid()"`
+type MySTruct struct {
 }
 
+// Chi la test
+func (t *MySTruct) SayHello() {
+
+}
 func TestUtisl(t *testing.T) {
+	st := MySTruct{}
+	st.SayHello()
 	cfg := utils.DbCfg{
 		Driver:   "postgres",
 		Host:     "localhost",
@@ -195,8 +222,8 @@ func TestFind(t *testing.T) {
 	fmt.Print(fmt.Sprintf("avg elapse time: %d", avgTime/1000))
 
 }
-
-func TestGorm(t *testing.T) {
+func TestGeTableMapFromDB(t *testing.T) {
+	utils.RegisterEntity(&Dept{}, &EmployeeInfo{}, &JobsProfile{}, &PersonalInfo{}, &UserInfo{})
 	cfg := utils.DbCfg{
 		Driver:   "postgres",
 		Host:     "localhost",
@@ -205,40 +232,78 @@ func TestGorm(t *testing.T) {
 		Password: "123456",
 		UseSSL:   false,
 	}
-	dns := cfg.GetDns("db_001124")
-	// You can use this struct with GORM like this:
-	db, err := gorm.Open(postgres.Open(dns), &gorm.Config{})
+	ctx := utils.NewDbContext(cfg)
+
+	err := ctx.Open()
 	if err != nil {
-		panic("failed to connect database")
+		panic(err)
 	}
+	defer ctx.Close()
+	err = ctx.Ping()
+	assert.NoError(t, err)
+	tanetDb, err := ctx.CreateCtx("db_001124")
+	assert.NoError(t, err)
+	tanetDb.Open()
+	defer tanetDb.Close()
+	tblInffo, err := tanetDb.GetTableMappingFromDb()
+	assert.NoError(t, err)
+	fmt.Println(tblInffo)
+	tanetDb.Open()
+}
 
-	// Migrate the schema
-
-	// if err != nil {
-	// 	panic("failed to connect database")
-	// }
-
-	db.AutoMigrate(&Dept2{})
-	totalTime := int64(0)
-	for i := 0; i < 10000; i++ {
-		start := time.Now()
-		dd := time.Now().Add(time.Hour * 24)
-		dep := Dept2{
-			Name:              "test",
-			Code:              "test" + fmt.Sprintf("%04d", i),
-			CreatedBy:         "admin",
-			EstablishmentDate: time.Now(),
-			DissolutionDate:   &dd,
-		}
-		db.Create(&dep)
-		n := time.Since(start).Abs().Milliseconds()
-		totalTime += n
-		if err != nil {
-			fmt.Println(fmt.Sprintf("elapse time: %04d %s", n, err))
-		} else {
-			fmt.Println(fmt.Sprintf("elapse time: %04d", n))
-		}
+func TestGetEmbededFronmReflectType(t *testing.T) {
+	type B struct {
 	}
-	avgTime := totalTime / 10000
-	fmt.Println(fmt.Sprintf("avg elapse time: %04d", avgTime))
+	type A struct {
+		B
+		b *B
+	}
+	info.GetTableInfoByType(reflect.TypeOf(A{}))
+	rt := reflect.TypeOf(A{})
+	for i := 0; i < rt.NumField(); i++ {
+		if rt.Field(i).Anonymous { // cho nay la nhung embedded struct dung kg
+			fmt.Println(rt.Field(i).Name)
+		}
+		fmt.Println(rt.Field(i).Name)
+	}
+	// fmt.Println(rt.Field(0).Type.Elem().Name())
+	// fmt.Println(rt.Field(0).Type.Elem().Field(0).Type.Name())
+}
+func TestCreatePersonal(t *testing.T) {
+	cfg := utils.DbCfg{
+		Driver:   "postgres",
+		Host:     "localhost",
+		Port:     5432,
+		User:     "postgres",
+		Password: "123456",
+		UseSSL:   false,
+	}
+	ctx := utils.NewDbContext(cfg)
+	err := ctx.Open()
+	if err != nil {
+		panic(err)
+	}
+	defer ctx.Close()
+	tenantDb, err := ctx.CreateCtx("db_001124")
+	assert.NoError(t, err)
+	err = tenantDb.Open()
+	if err != nil {
+		panic(err)
+	}
+	defer tenantDb.Close()
+	p := PersonalInfo{
+		FirstName: "test",
+		LastName:  "test",
+		Birthday:  time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
+		Gender:    "male",
+		Email:     "test@test.com5",
+		Phone:     "0987654321",
+	}
+	err = tenantDb.Insert(&p)
+	assert.NoError(t, err)
+	fmt.Println(p.Id)
+	r, err := tenantDb.Exec("delete from personalInfo where personalInfo.id<=?", 20)
+	assert.NoError(t, err)
+	fmt.Println(r.RowsAffected())
+
 }

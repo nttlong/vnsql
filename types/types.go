@@ -10,7 +10,8 @@ import (
 
 type IExecutor interface {
 	CreateInsertCommand(entity interface{}, tableInfo TableInfo) (*SqlWithParams, error)
-	CreatePosgresDbIfNotExist(ctx *sql.DB, dbName string, tenantDns string) error
+	CreatePostgresDbIfNotExist(ctx *sql.DB, dbName string, tenantDns string) error
+	GetTableInfoFormDb(ctx *sql.DB, dbName string) (*TableMapping, error)
 }
 type TableInfo struct {
 	TableName     string
@@ -18,6 +19,7 @@ type TableInfo struct {
 	Relationship  []*RelationshipInfo
 	MapCols       map[string]*ColInfo
 	AutoValueCols map[string]*ColInfo
+	EntityType    reflect.Type
 }
 type RelationshipInfo struct {
 	FromTable TableInfo
@@ -42,6 +44,27 @@ type ColInfo struct {
 type SqlWithParams struct {
 	Sql    string
 	Params []interface{}
+}
+type DbTbaleInfo struct {
+	TableName  string
+	ColInfos   map[string]string
+	EntityType reflect.Type
+}
+type TableMapping map[string]DbTbaleInfo
+
+func (t *TableMapping) String() string {
+	if t == nil {
+		return "nil"
+	}
+	ret := ""
+	for k, v := range *t {
+		ret += k + " : " + v.TableName + "\n"
+		for k1, v1 := range v.ColInfos {
+			ret += "\t" + k1 + " : " + v1 + "\n"
+		}
+	}
+	return ret
+
 }
 
 var MapDefaulValueOfGoType = map[reflect.Type]interface{}{

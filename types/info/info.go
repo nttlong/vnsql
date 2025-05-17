@@ -11,8 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/nttlong/vnsql/types"
 	_ "github.com/nttlong/vnsql/types"
-	"github.com/nttlong/vnsql/types/info/infopostgres"
-	_ "github.com/nttlong/vnsql/types/info/infopostgres"
+	"github.com/nttlong/vnsql/types/info/info_postgres"
+	_ "github.com/nttlong/vnsql/types/info/info_postgres"
 	"google.golang.org/genproto/googleapis/type/decimal"
 )
 
@@ -151,6 +151,10 @@ func GetColInfo(field reflect.StructField) *types.ColInfo {
 				panic(fmt.Errorf("invalid length %s", field.Tag.Get("db")))
 			}
 		}
+		if strings.HasPrefix(tg, ";auto;") {
+			ret.DefaultValue = "auto"
+		}
+
 		if strings.HasPrefix(tg, "df:") {
 			if strings.Contains(tg, ":") {
 				dfValue := strings.Split(tg, ":")[1]
@@ -199,7 +203,7 @@ func (c *TableInfo) GetSql(dbDriver string) []string {
 	// 	return getSqlOfTableInfoForMysql(&c)
 	case "postgres":
 
-		return infopostgres.GetSqlOfTableInfoForPostgres(c.TableInfo)
+		return info_postgres.GetSqlOfTableInfoForPostgres(c.TableInfo, nil)
 	// case "sqlite3":
 	// 	return getSqlOfTableInfoForSqlite3(&c)
 	default:
@@ -255,6 +259,13 @@ func getTableInfoByType(typ reflect.Type) (*types.TableInfo, error) {
 	colsProc := map[string]int{} // map colum name to index in colInfos
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
+		if field.Anonymous {
+			embededTable, err := getTableInfoByType(field.Type)
+			if err != nil {
+				return nil, err
+			}
+			table.ColInfos = append(table.ColInfos, embededTable.ColInfos...)
+		}
 		colInfo := GetColInfo(field)
 
 		if colInfo == nil {
@@ -378,6 +389,7 @@ func getTableInfoByType(typ reflect.Type) (*types.TableInfo, error) {
 			table.AutoValueCols[col.Name] = &table.ColInfos[i]
 		}
 	}
+	table.EntityType = typ
 
 	return &table, nil
 }
