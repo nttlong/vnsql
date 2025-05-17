@@ -37,6 +37,10 @@ func TestCompiler(t *testing.T) {
 }
 
 var sqlTest = []string{
+	"select code,concat(firstName,' ', lastName) as fullName from personalInfo where id  in (select id from employeeInfo)->SELECT concat(\"PersonalInfo\".\"FirstName\", ' ', \"PersonalInfo\".\"LastName\") AS \"fullName\" FROM \"PersonalInfo\" WHERE \"PersonalInfo\".\"Id\" in (SELECT \"PersonalInfo\".\"Id\" FROM \"EmployeeInfo\")",
+	"select concat(firstName,' ', lastName) as fullName from personalInfo->SELECT concat(\"PersonalInfo\".\"FirstName\", ' ', \"PersonalInfo\".\"LastName\") AS \"fullName\" FROM \"PersonalInfo\"",
+
+	"insert into employeeInfo (id, name, code) values (?, ?, ?) ->INSERT INTO \"EmployeeInfo\" (\"Id\", \"name\", \"Code\") VALUES ($1, $2, $3)",
 	"select id from employeeInfo where id = ?->SELECT \"EmployeeInfo\".\"Id\" FROM \"EmployeeInfo\" WHERE \"EmployeeInfo\".\"Id\" = $1",
 	"select len(code)+id from employeeInfo where id = ? ->SELECT LENGTH(\"EmployeeInfo\".\"Code\") + \"EmployeeInfo\".\"Id\" FROM \"EmployeeInfo\" WHERE \"EmployeeInfo\".\"Id\" = $1",
 	"select emp.Id from employeeInfo emp left join Dept dept on emp.DeptId = dept.Id where emp.Id = ?->SELECT \"emp\".\"Id\" FROM \"EmployeeInfo\" AS \"emp\" left join \"Dept\" AS \"dept\" ON \"emp\".\"DeptId\" = \"dept\".\"Id\" WHERE \"emp\".\"Id\" = $1",
@@ -63,6 +67,8 @@ func TestCompilerSQl(t *testing.T) {
 		if sqlExpected != sqlResult {
 			sqtPrint := strings.Replace(sqlResult, "\"", "\\\"", -1)
 			fmt.Println("[", i, "]", sqlInput+"->"+sqtPrint)
+		} else {
+			fmt.Println("[", i, "]", sqlResult)
 		}
 		assert.Equal(t, sqlExpected, sqlResult)
 

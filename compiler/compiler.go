@@ -13,6 +13,29 @@ import (
 )
 
 type NodeType int
+type SqlTypeEnum int
+
+const (
+	Unknown SqlTypeEnum = iota
+	Insert
+	Update
+	Delete
+	Select
+)
+
+func (s SqlTypeEnum) String() string {
+	names := [...]string{
+		"Unknown",
+		"Insert",
+		"Update",
+		"Delete",
+		"Select",
+	}
+	if s < Insert || s > Select {
+		return "Unknown"
+	}
+	return names[s]
+}
 
 const (
 	Selector NodeType = iota
@@ -62,6 +85,7 @@ type ParseContext struct {
 	SqlNodes  []sqlparser.SQLNode
 	TableName string
 	Alias     string
+	SqlType   SqlTypeEnum
 }
 
 type TableMap map[string]string
@@ -186,26 +210,30 @@ func isParam(s string) (string, bool) {
 	}
 	return "", false
 }
-func (n *Node) IsNumber(s string) (interface{}, bool) {
+func (n *Node) IsNumber() (interface{}, bool) {
+	s := n.V
 	if ret, err := strconv.ParseFloat(s, 64); err == nil {
 		return ret, true
 	}
 	if ret, err := strconv.ParseFloat(s, 64); err == nil {
 		return ret, true
 	}
-	return nil, false
-}
-func (n *Node) IsDate(s string) (*time.Time, bool) {
-	if ret, err := time.Parse("2006-01-02", s); err == nil {
-		return &ret, true
-	}
-	if ret, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
-		return &ret, true
+	if ret, err := strconv.ParseInt(s, 64, 64); err == nil {
+		return ret, true
 	}
 	return nil, false
 }
-func (n *Node) IsBool(s string) (bool, bool) {
-	if ret, err := strconv.ParseBool(s); err == nil {
+func (n *Node) IsDate() (*time.Time, bool) {
+	if ret, err := time.Parse("2006-01-02", n.V); err == nil {
+		return &ret, true
+	}
+	if ret, err := time.Parse("2006-01-02 15:04:05", n.V); err == nil {
+		return &ret, true
+	}
+	return nil, false
+}
+func (n *Node) IsBool() (bool, bool) {
+	if ret, err := strconv.ParseBool(n.V); err == nil {
 		return ret, true
 	}
 	return false, false
@@ -225,6 +253,7 @@ func (w Compiler) parse(sql string) (string, error) {
 		panic(fmt.Sprintf("not support ddl: %s. Please call Walker.ParseDBDLL instead ", sql))
 
 	}
+	sql = " " + sql
 	if !strings.Contains(strings.ToLower(sql), " from ") &&
 		!strings.Contains(strings.ToLower(sql), " insert ") &&
 		!strings.Contains(strings.ToLower(sql), " update ") &&
@@ -343,6 +372,7 @@ func (w Compiler) walkSQLNode(node sqlparser.SQLNode, ctx *ParseContext) (string
 			strAlias = strAliasGet
 
 		}
+		ctx.SqlNodes = append(ctx.SqlNodes, fx)
 		n, err := w.OnParse(Node{Nt: TableName, V: fx.Name.String()})
 		if err != nil {
 			return "", err
@@ -429,11 +459,7 @@ func (w Compiler) walkSQLNode(node sqlparser.SQLNode, ctx *ParseContext) (string
 
 	}
 	if fx, ok := node.(sqlparser.ColIdent); ok {
-		n, err := w.OnParse(Node{Nt: Field, V: fx.String()})
-		if err != nil {
-			return "", err
-		}
-		return n.V, nil
+		return w.walkOnColIdent(fx, ctx)
 
 	}
 	if fx, ok := node.(*sqlparser.Limit); ok {
@@ -669,7 +695,7 @@ func (w Compiler) walkOnSelect(stmt *sqlparser.Select, ctx *ParseContext) (strin
 
 }
 func (w Compiler) walkOnInsert(stmt *sqlparser.Insert, ctx *ParseContext) (string, error) {
-
+	ctx.SqlType = Insert
 	tableName, err := w.walkSQLNode(stmt.Table, ctx)
 	if err != nil {
 		return "", err
@@ -683,7 +709,9 @@ func (w Compiler) walkOnInsert(stmt *sqlparser.Insert, ctx *ParseContext) (strin
 		}
 		cols = append(cols, colName)
 	}
+
 	if fx, ok := stmt.Rows.(*sqlparser.Select); ok {
+		ctx.SqlType = Select
 		sqlSelect, err := w.walkOnSelect(fx, ctx)
 		if err != nil {
 			return "", err
@@ -709,6 +737,7 @@ func (w Compiler) walkOnInsert(stmt *sqlparser.Insert, ctx *ParseContext) (strin
 }
 
 func (w Compiler) walkOnUpdate(stmt *sqlparser.Update, ctx *ParseContext) (string, error) {
+	ctx.SqlType = Update
 	tableName, err := w.walkSQLNode(stmt.TableExprs, ctx)
 	if err != nil {
 		return "", err
@@ -725,6 +754,7 @@ func (w Compiler) walkOnUpdate(stmt *sqlparser.Update, ctx *ParseContext) (strin
 		}
 		ret = append(ret, colName+" = "+colValue)
 	}
+	ctx.SqlType = Unknown
 	where := ""
 	if stmt.Where != nil {
 		where, err = w.walkSQLNode(stmt.Where, ctx)
@@ -737,6 +767,7 @@ func (w Compiler) walkOnUpdate(stmt *sqlparser.Update, ctx *ParseContext) (strin
 
 }
 func (w Compiler) walkOnDelete(stmt *sqlparser.Delete, ctx *ParseContext) (string, error) {
+
 	tableName, err := w.walkSQLNode(stmt.Targets, ctx)
 	if err != nil {
 		return "", err
@@ -1022,7 +1053,63 @@ func (w Compiler) walkOnBinaryExpr(expr *sqlparser.BinaryExpr, ctx *ParseContext
 	}
 	return left + " " + op.V + " " + right, nil
 }
+func (w Compiler) walkOnColIdent(expr sqlparser.ColIdent, ctx *ParseContext) (string, error) {
+	for _, x := range ctx.SqlNodes {
+		if fx, ok := x.(*sqlparser.TableName); ok {
+			n, err := w.OnParse(Node{Nt: Field, V: fx.Name.String() + "." + expr.String()})
+			if err != nil {
+				return "", err
+			}
+			if strings.Contains(n.V, ".") {
+
+				return strings.Split(n.V, ".")[1], nil
+
+			}
+			return n.V, nil
+		}
+		if fx, ok := x.(sqlparser.TableName); ok {
+			n, err := w.OnParse(Node{Nt: Field, V: fx.Name.String() + "." + expr.String()})
+			if err != nil {
+				return "", err
+			}
+			if ctx.SqlType == Insert {
+				if strings.Contains(n.V, ".") {
+
+					return strings.Split(n.V, ".")[1], nil
+
+				}
+				return n.V, nil
+			}
+			return n.V, nil
+		}
+
+	}
+	n, err := w.OnParse(Node{Nt: Field, V: expr.String()})
+	if err != nil {
+		return "", err
+	}
+	return n.V, nil
+}
+
 func (w Compiler) OnParse(node Node) (Node, error) {
+	if node.Nt == Value {
+		if v, ok := node.IsBool(); ok {
+			if v {
+				node.V = "TRUE"
+			} else {
+				node.V = "FALSE"
+			}
+		}
+		if _, ok := node.IsDate(); ok {
+			return node, nil
+		}
+		if _, ok := node.IsNumber(); ok {
+			return node, nil
+		}
+		//escape "'" in node.V
+		node.V = "'" + strings.Replace(node.V, "'", "''", -1) + "'"
+		return node, nil
+	}
 	if node.Nt == TableName {
 		tableNameLower := strings.ToLower(node.V)
 		if matchTableName, ok := w.TableDict[tableNameLower]; ok {
