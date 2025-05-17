@@ -573,6 +573,9 @@ func (w Compiler) walkSQLNode(node sqlparser.SQLNode, ctx *ParseContext) (string
 		}
 		return n.V, nil
 	}
+	if _, ok := node.(*sqlparser.NullVal); ok {
+		return "NULL", nil
+	}
 
 	panic(fmt.Sprintf("unsupported type %s in parser.walkSQLNode", reflect.TypeOf(node)))
 

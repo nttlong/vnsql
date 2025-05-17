@@ -37,6 +37,8 @@ func TestCompiler(t *testing.T) {
 }
 
 var sqlTest = []string{
+	"insert info personalInfo (id, firstName, lastName)  select id, firstName, lastName from personalInfo ->INSERT INTO \"PersonalInfo\" (\"Id\", \"FirstName\", \"LastName\") SELECT \"Id\", \"FirstName\", \"LastName\" FROM \"PersonalInfo\" WHERE \"Id\" = $1",
+	"select * from employeeInfo where id !=null->SELECT * FROM \"",
 	"select code,concat(firstName,' ', lastName) as fullName from personalInfo where id  in (select id from employeeInfo)->SELECT concat(\"PersonalInfo\".\"FirstName\", ' ', \"PersonalInfo\".\"LastName\") AS \"fullName\" FROM \"PersonalInfo\" WHERE \"PersonalInfo\".\"Id\" in (SELECT \"PersonalInfo\".\"Id\" FROM \"EmployeeInfo\")",
 	"select concat(firstName,' ', lastName) as fullName from personalInfo->SELECT concat(\"PersonalInfo\".\"FirstName\", ' ', \"PersonalInfo\".\"LastName\") AS \"fullName\" FROM \"PersonalInfo\"",
 
