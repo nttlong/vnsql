@@ -15,12 +15,12 @@ import (
 type Executor struct {
 }
 
-//var cacheSqlWithParams sync.Map
+var cacheSqlWithParams sync.Map
 
 func (e *Executor) CreateInsertCommand(entity interface{}, tableInfo types.TableInfo) (*types.SqlWithParams, error) {
-	// if v, ok := cacheSqlWithParams.Load(tableInfo.TableName); ok {
-	// 	return v.(*types.SqlWithParams), nil
-	// }
+	if v, ok := cacheSqlWithParams.Load(tableInfo.TableName); ok {
+		return v.(*types.SqlWithParams), nil
+	}
 	// start := time.Now()
 
 	sqlWithParams, err := e.createInsertCommand(entity, tableInfo)
@@ -28,7 +28,7 @@ func (e *Executor) CreateInsertCommand(entity interface{}, tableInfo types.Table
 	if err != nil {
 		return nil, err
 	}
-	// cacheSqlWithParams.Store(tableInfo.TableName, sqlWithParams)
+	cacheSqlWithParams.Store(tableInfo.TableName, sqlWithParams)
 	return sqlWithParams, nil
 
 }
@@ -59,7 +59,7 @@ func (e *Executor) createInsertCommand(entity interface{}, tableInfo types.Table
 					continue
 				}
 				if !col.AllowNull && col.DefaultValue == "" {
-					if val, ok := types.MapDefaulValueOfGoType[fieldVal.Type()]; ok {
+					if val, ok := types.MapDefaultValueOfGoType[fieldVal.Type()]; ok {
 						ret.Params = append(ret.Params, val)
 						fields = append(fields, col.Name)
 						valParams = append(valParams, "?")

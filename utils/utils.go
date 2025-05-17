@@ -135,7 +135,15 @@ func GetExecutor(dbDriver string) types.IExecutor {
 	}
 	panic(fmt.Errorf("not support db driver %s", dbDriver))
 }
-
+func (ctx *DbContext) GetCompiler() compiler.Compiler {
+	if ctx.dbDriver == "postgres" {
+		ret := *compiler_postgres.NewCompiler().Compiler
+		ret.TableInfo = entitiesCache
+		return ret
+	} else {
+		panic(fmt.Errorf("not support db driver %s", ctx.dbDriver))
+	}
+}
 func (ctx *TenantDbContext) Migrate(entity interface{}) (reflect.Type, error) {
 
 	typ := reflect.TypeOf(entity)
@@ -215,6 +223,20 @@ func (ctx *DbContext) CreateCtx(dbName string) (*TenantDbContext, error) {
 		return nil, err
 	}
 	tblInTableMap := *tblMap
+	dbCompiler := ctx.GetCompiler()
+	if _, ok := dbCompiler.GetDbDict(dbName); !ok {
+		fx := compiler.DbDictionary{
+			DbName: dbName,
+			Tables: map[string]compiler.DbTableDictionaryItem{},
+		}
+		for k, v := range tblInTableMap {
+			fx.Tables[k] = compiler.DbTableDictionaryItem{
+				TableName: v.TableName,
+				Cols:      v.ColInfos,
+			}
+		}
+		dbCompiler.AddDbDict(dbName, fx)
+	}
 	for _, v := range entitiesCache {
 
 		if tblInMap, ok := tblInTableMap[strings.ToLower(v.TableName)]; ok {
@@ -284,18 +306,29 @@ func (ctx *TenantDbContext) Insert(entity interface{}) error {
 		return err
 	}
 	execSql, err := walker.Parse(dataInsert.Sql)
-	// if walker.ResolverInsertSQL == nil {
-	// 	return fmt.Errorf("walker.ResolverInsertSQL is not set")
-	// }
-	// resolverInsertSQL := walker.ResolverInsertSQL
+	if err != nil {
+		return err
+	}
+	// start := time.Now()
+	if walker.OnParseInsertSQL == nil {
+		return fmt.Errorf("compiler.Compiler.OnParseInsertSQL is not set")
+	}
+	if tblInfo.AutoValueColsName == nil {
+		tblInfo.AutoValueColsName = []string{}
+		for _, col := range tblInfo.ColInfos {
+			if col.DefaultValue == "auto" {
+				tblInfo.AutoValueColsName = append(tblInfo.AutoValueColsName, col.Name)
+			}
+		}
 
-	// execSql2, err := resolverInsertSQL(execSql, *tblInfo)
+	}
+	execSql2, err := walker.OnParseInsertSQL(walker, execSql, tblInfo.AutoValueColsName, []string{})
 	if err != nil {
 		return err
 	}
 	// resultArray := []interface{}{}
 
-	rw, err := ctx.Query(execSql, dataInsert.Params...)
+	rw, err := ctx.Query((*execSql2), dataInsert.Params...)
 	if err != nil {
 		return err
 	}

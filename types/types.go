@@ -14,12 +14,14 @@ type IExecutor interface {
 	GetTableInfoFormDb(ctx *sql.DB, dbName string) (*TableMapping, error)
 }
 type TableInfo struct {
-	TableName     string
-	ColInfos      []ColInfo
-	Relationship  []*RelationshipInfo
-	MapCols       map[string]*ColInfo
-	AutoValueCols map[string]*ColInfo
-	EntityType    reflect.Type
+	TableName              string
+	ColInfos               []ColInfo
+	Relationship           []*RelationshipInfo
+	MapCols                map[string]*ColInfo
+	AutoValueCols          map[string]*ColInfo
+	EntityType             reflect.Type
+	AutoValueColsName      []string
+	IsHasAutoValueColsName bool
 }
 type RelationshipInfo struct {
 	FromTable TableInfo
@@ -67,7 +69,7 @@ func (t *TableMapping) String() string {
 
 }
 
-var MapDefaulValueOfGoType = map[reflect.Type]interface{}{
+var MapDefaultValueOfGoType = map[reflect.Type]interface{}{
 	reflect.TypeOf(int(0)):      0,
 	reflect.TypeOf(int8(0)):     0,
 	reflect.TypeOf(int16(0)):    0,

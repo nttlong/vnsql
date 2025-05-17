@@ -2,6 +2,7 @@ package compiler_postgres
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/nttlong/vnsql/compiler"
 )
@@ -73,4 +74,18 @@ func postgresResolverInsertSQL(ctx *compiler.Compiler, sql string, autoValueCols
 	}
 
 	return &sql, nil
+}
+
+var once sync.Once
+var _DbDictionary *CompilerPostgres
+
+func NewCompiler() *CompilerPostgres {
+	once.Do(func() {
+		_DbDictionary = &CompilerPostgres{&compiler.Compiler{
+			OnParse:          postgresOnParse,
+			OnParseInsertSQL: postgresResolverInsertSQL,
+		}}
+	})
+	return _DbDictionary
+
 }
