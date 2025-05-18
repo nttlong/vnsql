@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/nttlong/vnsql/types"
 	_ "github.com/nttlong/vnsql/types"
-	"github.com/nttlong/vnsql/types/info/info_postgres"
 	_ "github.com/nttlong/vnsql/types/info/info_postgres"
 	"google.golang.org/genproto/googleapis/type/decimal"
 )
@@ -197,19 +196,20 @@ func GetTableInfo(obj interface{}) (*types.TableInfo, error) {
 	}
 	return GetTableInfoByType(typ)
 }
-func (c *TableInfo) GetSql(dbDriver string) []string {
-	switch dbDriver {
-	// case "mysql":
-	// 	return getSqlOfTableInfoForMysql(&c)
-	case "postgres":
 
-		return info_postgres.GetSqlOfTableInfoForPostgres(c.TableInfo, nil)
-	// case "sqlite3":
-	// 	return getSqlOfTableInfoForSqlite3(&c)
-	default:
-		panic(fmt.Errorf("not support db driver %s", dbDriver))
-	}
-}
+// func (c *TableInfo) GetSql(dbDriver string) []string {
+// 	switch dbDriver {
+// 	// case "mysql":
+// 	// 	return getSqlOfTableInfoForMysql(&c)
+// 	case "postgres":
+
+// 		return info_postgres.GetSqlOfTableInfoForPostgres(c.TableInfo, nil)
+// 	// case "sqlite3":
+// 	// 	return getSqlOfTableInfoForSqlite3(&c)
+// 	default:
+// 		panic(fmt.Errorf("not support db driver %s", dbDriver))
+// 	}
+// }
 
 // private var
 
@@ -265,11 +265,14 @@ func getTableInfoByType(typ reflect.Type) (*types.TableInfo, error) {
 				return nil, err
 			}
 			table.ColInfos = append(table.ColInfos, embededTable.ColInfos...)
+			continue
 		}
 		colInfo := GetColInfo(field)
 
 		if colInfo == nil {
-			remainFields = append(remainFields, field)
+			if !field.Anonymous {
+				remainFields = append(remainFields, field)
+			}
 			continue
 		}
 		colInfo.IndexOnStruct = i
@@ -324,7 +327,7 @@ func getTableInfoByType(typ reflect.Type) (*types.TableInfo, error) {
 			}
 		}
 	}
-	// check relationship in remainFields
+	//check relationship in remainFields
 	for _, field := range remainFields {
 		tag := field.Tag.Get("db")
 		strTags := strings.ToLower(";" + tag + ";")
@@ -376,6 +379,9 @@ func getTableInfoByType(typ reflect.Type) (*types.TableInfo, error) {
 			}
 			table.Relationship = append(table.Relationship, &rel)
 
+		} else if strings.Contains(strTags, ";fk(") {
+			fmt.Println("not support fk with func yet")
+
 		} else {
 
 		}
@@ -392,4 +398,24 @@ func getTableInfoByType(typ reflect.Type) (*types.TableInfo, error) {
 	table.EntityType = typ
 
 	return &table, nil
+}
+func GetTypeOfEntity(entity interface{}) reflect.Type {
+	typ := reflect.TypeOf(entity)
+	if typ.Kind() == reflect.Slice {
+		typ = typ.Elem()
+	}
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	if typ.Kind() == reflect.Slice {
+		typ = typ.Elem()
+	}
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	return typ
 }

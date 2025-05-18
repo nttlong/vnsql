@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,6 +87,7 @@ type ParseContext struct {
 	TableName string
 	Alias     string
 	SqlType   SqlTypeEnum
+	Owner     Compiler
 }
 
 type TableMap map[string]string
@@ -151,6 +153,22 @@ type Compiler struct {
 
 }
 
+func (q QuoteIdentifier) UnQuote(s ...string) string {
+	if len(s) == 0 {
+		return ""
+	}
+
+	rets := []string{}
+	for _, v := range s {
+		if strings.HasPrefix(v, q.Left) && strings.HasSuffix(v, q.Right) {
+			v = v[len(q.Left) : len(v)-len(q.Right)]
+		}
+		rets = append(rets, v)
+
+	}
+	return strings.Join(rets, ".")
+
+}
 func (q *QuoteIdentifier) Quote(s ...string) string {
 	if len(s) == 0 {
 		return ""
@@ -176,7 +194,9 @@ func (q *QuoteIdentifier) Quote(s ...string) string {
 //		w.DbDict[strings.ToLower(dbName)] = dict
 //	}
 func (w Compiler) ParseInsertSQL(sql string, autoValueCols []string, returnColAfterInsert []string) (*string, error) {
-	return nil, fmt.Errorf("not support yet")
+	var returning = "returning " + "\"" + strings.Join(autoValueCols, "\",\"") + "\""
+	ret := sql + " " + returning
+	return &ret, nil
 }
 
 func (w Compiler) Parse(sql string) (string, error) {
@@ -238,11 +258,16 @@ func (n *Node) IsBool() (bool, bool) {
 	}
 	return false, false
 }
+func replaceStringLiteralsWithQuestionMark(sql string) string {
+	re := regexp.MustCompile(`('[^'\\]*(?:\\.[^'\\]*)*')`)
+	return re.ReplaceAllString(sql, "?")
+}
 func (w Compiler) parse(sql string) (string, error) {
 	parseCtx := ParseContext{
 		SqlNodes:  []sqlparser.SQLNode{},
 		TableName: "",
 		Alias:     "",
+		Owner:     w,
 	}
 	sql = " " + sql
 	stm, err := sqlparser.Parse(sql)
@@ -254,10 +279,11 @@ func (w Compiler) parse(sql string) (string, error) {
 
 	}
 	sql = " " + sql
-	if !strings.Contains(strings.ToLower(sql), " from ") &&
-		!strings.Contains(strings.ToLower(sql), " insert ") &&
-		!strings.Contains(strings.ToLower(sql), " update ") &&
-		!strings.Contains(strings.ToLower(sql), " delete ") {
+	sqlDetect := replaceStringLiteralsWithQuestionMark(sql)
+	if !strings.Contains(strings.ToLower(sqlDetect), " from ") &&
+		!strings.Contains(strings.ToLower(sqlDetect), " insert ") &&
+		!strings.Contains(strings.ToLower(sqlDetect), " update ") &&
+		!strings.Contains(strings.ToLower(sqlDetect), " delete ") {
 		if fx, ok := stm.(*sqlparser.Select); ok {
 			return w.walkOnSelectOnly(fx, &parseCtx)
 		}
@@ -295,6 +321,23 @@ func (w Compiler) walkSQLNode(node sqlparser.SQLNode, ctx *ParseContext) (string
 			return n.V + ".*", nil
 
 		}
+		// gGroup := ctx.groupWithAs()
+		// if len(gGroup) > 0 {
+		// 	mapTable := map[string]string{}
+		// 	for _, tn := range ctx.SqlNodes {
+		// 		tnlName, err := w.walkSQLNode(tn, ctx)
+		// 		if err != nil {
+		// 			return "", err
+		// 		}
+		// 		mapTable[strings.ToLower(tnlName)] = tnlName
+		// 	}
+		// 	ret := []string{}
+		// 	for _, tbl := range mapTable {
+		// 		ret = append(ret, tbl+".*")
+		// 	}
+		// 	return strings.Join(ret, ", "), nil
+
+		// }
 		if ctx.TableName != "" {
 			return ctx.TableName + ".*", nil
 		}
@@ -302,7 +345,9 @@ func (w Compiler) walkSQLNode(node sqlparser.SQLNode, ctx *ParseContext) (string
 	}
 	if fx, ok := node.(*sqlparser.AliasedExpr); ok {
 		if fx.As.IsEmpty() {
-			return w.walkSQLNode(fx.Expr, ctx)
+			ret, err := w.walkSQLNode(fx.Expr, ctx)
+			// fmt.Println(len(ctx.SqlNodes))
+			return ret, err
 
 		}
 
@@ -335,9 +380,11 @@ func (w Compiler) walkSQLNode(node sqlparser.SQLNode, ctx *ParseContext) (string
 
 	}
 	if fx, ok := node.(*sqlparser.ColName); ok {
-		return w.walkOnColName(fx, ctx)
-
+		ret, err := w.walkOnColName(fx, ctx)
+		// fmt.Println(len(ctx.SqlNodes))
+		return ret, err
 	}
+
 	if fx, ok := node.(*sqlparser.ParenExpr); ok {
 
 		return w.walkSQLParen(fx, ctx)
@@ -455,7 +502,12 @@ func (w Compiler) walkSQLNode(node sqlparser.SQLNode, ctx *ParseContext) (string
 		return w.walkOnOrderBy(&fx, ctx)
 	}
 	if fx, ok := node.(*sqlparser.Subquery); ok {
-		return w.walkOnSubquery(*fx, ctx)
+		oldSqlNodes := ctx.SqlNodes
+		ctx.SqlNodes = []sqlparser.SQLNode{} // reset
+		ret, err := w.walkOnSubquery(*fx, ctx)
+		ctx.SqlNodes = oldSqlNodes
+
+		return ret, err
 
 	}
 	if fx, ok := node.(sqlparser.ColIdent); ok {
@@ -576,6 +628,9 @@ func (w Compiler) walkSQLNode(node sqlparser.SQLNode, ctx *ParseContext) (string
 	if _, ok := node.(*sqlparser.NullVal); ok {
 		return "NULL", nil
 	}
+	if fx, ok := node.(sqlparser.TableIdent); ok {
+		return fx.String(), nil
+	}
 
 	panic(fmt.Sprintf("unsupported type %s in parser.walkSQLNode", reflect.TypeOf(node)))
 
@@ -605,14 +660,21 @@ func (w Compiler) walkOnCaseExpr(expr *sqlparser.CaseExpr, ctx *ParseContext) (s
 func (w Compiler) walkOnStatement(stmt sqlparser.Statement, ctx *ParseContext) (string, error) {
 	switch stmt := stmt.(type) {
 	case *sqlparser.Union:
+		ctx.SqlNodes = []sqlparser.SQLNode{} // reset
 		return w.walkOnUnion(stmt, ctx)
 	case *sqlparser.Select:
-		return w.walkOnSelect(stmt, ctx)
+		ctx.SqlNodes = []sqlparser.SQLNode{} // reset
+		ret, err := w.walkOnSelect(stmt, ctx)
+
+		return ret, err
 	case *sqlparser.Insert:
+		ctx.SqlNodes = []sqlparser.SQLNode{} // reset
 		return w.walkOnInsert(stmt, ctx)
 	case *sqlparser.Update:
+		ctx.SqlNodes = []sqlparser.SQLNode{} // reset
 		return w.walkOnUpdate(stmt, ctx)
 	case *sqlparser.Delete:
+		ctx.SqlNodes = []sqlparser.SQLNode{} // reset
 		return w.walkOnDelete(stmt, ctx)
 	default:
 		panic(fmt.Sprintf("unsupported statement type %T", stmt))
@@ -620,15 +682,125 @@ func (w Compiler) walkOnStatement(stmt sqlparser.Statement, ctx *ParseContext) (
 
 }
 func (w Compiler) walkOnUnion(stmt *sqlparser.Union, ctx *ParseContext) (string, error) {
+	ctx.SqlNodes = []sqlparser.SQLNode{} // reset
 	left, err := w.walkSQLNode(stmt.Left, ctx)
 	if err != nil {
 		return "", err
 	}
+	ctx.SqlNodes = []sqlparser.SQLNode{} // reset
 	right, err := w.walkSQLNode(stmt.Right, ctx)
 	if err != nil {
 		return "", err
 	}
 	return left + " " + stmt.Type + " " + right, nil
+}
+func (p *ParseContext) getMap(expr sqlparser.SQLNode) (string, string) {
+	// fmt.Println(reflect.TypeOf(expr))
+	if fx, ok := expr.(*sqlparser.AliasedTableExpr); ok {
+		x, y := p.getMap(fx.Expr)
+		if fx.As.IsEmpty() {
+			return x, y
+		}
+		if y == "" {
+			return fx.As.String(), fx.As.String()
+		}
+		return fx.As.String(), y
+
+	}
+	if fx, ok := expr.(sqlparser.TableName); ok {
+		return fx.Name.String(), fx.Name.String()
+	}
+	if _, ok := expr.(*sqlparser.Subquery); ok {
+		// fmt.Println(fx)
+		return "", ""
+	}
+	if fx, ok := expr.(sqlparser.TableIdent); ok {
+		return fx.String(), fx.String()
+	}
+
+	panic(fmt.Sprintf("unsupported type %s in ParseContext.getMap", reflect.TypeOf(expr)))
+}
+func (p *ParseContext) groupWithAs() map[string]string {
+	sqlNodes := p.SqlNodes
+	ret := map[string]string{}
+	if len(sqlNodes) == 0 {
+		return ret
+	}
+	i := 0
+
+	for i < len(sqlNodes) {
+		alias, tableName := p.getMap(sqlNodes[i])
+		if alias == tableName {
+			n, err := p.Owner.OnParse(Node{Nt: TableName, V: tableName})
+			if err != nil {
+				ret[alias] = tableName
+				i++
+				continue
+			}
+			tableName = p.Owner.Quote.UnQuote(n.V)
+			if alias != tableName {
+				ret[strings.ToLower(alias)] = tableName
+			}
+			i++
+			continue
+		}
+		lowerAlias := strings.ToLower(alias)
+		n, err := p.Owner.OnParse(Node{Nt: TableName, V: tableName})
+		if err != nil {
+			ret[lowerAlias] = tableName
+		} else {
+			ret[lowerAlias] = p.Owner.Quote.UnQuote(n.V)
+
+		}
+
+		// tableName := ""
+
+		// // tmpParseContext := ParseContext{SqlNodes: []sqlparser.SQLNode{}, Owner: p.Owner}
+		// if tbl, ok := sqlNodes[i].(*sqlparser.AliasedTableExpr); ok {
+		// 	// if tbl.As.IsEmpty() {
+		// 	// 	ret[tbl.Expr.Format()] = tbl.Expr.Format()
+		// 	// }
+
+		// 	fmt.Println(tbl)
+
+		// } else if tbl, ok := sqlNodes[i].(*sqlparser.TableExprs); ok {
+		// 	fmt.Println(tbl)
+
+		// } else if tbl, ok := sqlNodes[i].(*sqlparser.TableName); ok {
+		// 	fmt.Println(tbl)
+		// } else {
+
+		// 	panic(fmt.Sprintf("unsupported type %s in parser.groupWithAs", reflect.TypeOf(sqlNodes[i])))
+		// }
+		// // tableName, err := p.Owner.walkSQLNode(sqlNodes[i], &tmpParseContext)
+		// if err != nil {
+		// 	i++
+		// 	continue
+		// }
+		// if strings.Contains(tableName, " AS ") {
+		// 	_tableName := strings.Split(tableName, " AS ")[0]
+		// 	_tableName = p.Owner.Quote.UnQuote(_tableName)
+		// 	alias := strings.Split(tableName, " AS ")[1]
+		// 	alias = p.Owner.Quote.UnQuote(alias)
+		// 	ret[strings.ToLower(alias)] = _tableName
+		// } else {
+		// 	tableName = p.Owner.Quote.UnQuote(tableName)
+		// 	ret[strings.ToLower(tableName)] = tableName
+		// 	// if i+1 < len(sqlNodes) {
+		// 	// 	alias, err := p.Owner.walkSQLNode(sqlNodes[i+1], &tmpParseContext)
+		// 	// 	if err != nil {
+		// 	// 		i += 2
+		// 	// 		continue
+		// 	// 	}
+		// 	// 	ret[strings.ToLower(alias)] = alias
+		// 	// 	ret[strings.ToLower(tableName)] = tableName
+
+		// 	// }
+
+		// }
+		i++
+	}
+	return ret
 }
 
 func (w Compiler) walkOnSelect(stmt *sqlparser.Select, ctx *ParseContext) (string, error) {
@@ -638,6 +810,8 @@ func (w Compiler) walkOnSelect(stmt *sqlparser.Select, ctx *ParseContext) (strin
 	strSelect := ""
 
 	if stmt.From != nil {
+		sqlNodes := ctx.extractAllTableInfo(stmt.From)
+		ctx.SqlNodes = sqlNodes
 		from, err := w.walkSQLNode(stmt.From, ctx)
 		if err != nil {
 			return "", err
@@ -645,14 +819,19 @@ func (w Compiler) walkOnSelect(stmt *sqlparser.Select, ctx *ParseContext) (strin
 		strFrom = "FROM " + from
 
 	}
+	// grNodes := ctx.groupWithAs()
+
+	selectFields := []string{}
 	for _, sel := range stmt.SelectExprs {
 
 		s, err := w.walkSQLNode(sel, ctx)
 		if err != nil {
 			return "", err
 		}
-		strSelect = "SELECT " + s
+		selectFields = append(selectFields, s)
+
 	}
+	strSelect = "SELECT " + strings.Join(selectFields, ", ")
 	ret = append(ret, strSelect, strFrom)
 
 	if stmt.GroupBy != nil {
@@ -779,11 +958,14 @@ func (w Compiler) walkOnDelete(stmt *sqlparser.Delete, ctx *ParseContext) (strin
 	if err != nil {
 		return "", err
 	}
+	strWhere := ""
+	if stmt.Where != nil {
+		_strWhere, err := w.walkSQLNode(stmt.Where, ctx)
 
-	strWhere, err := w.walkSQLNode(stmt.Where, ctx)
-
-	if err != nil {
-		return "", err
+		if err != nil {
+			return "", err
+		}
+		strWhere = _strWhere
 	}
 	n, err := w.OnParse(Node{
 		Nt: Using, Un: &UsingNodeOnDelete{
@@ -799,11 +981,45 @@ func (w Compiler) walkOnDelete(stmt *sqlparser.Delete, ctx *ParseContext) (strin
 		return n.Un.ReNewSQL, nil
 	}
 	if tableName == "" {
+		if strWhere == "" {
+			return "DELETE FROM " + tableNameUsing, nil
+		}
 		return "DELETE FROM " + tableNameUsing + " WHERE " + strWhere, nil
+	}
+	if strWhere == "" {
+		return "DELETE FROM " + tableName + " USING " + tableNameUsing, nil
 	}
 	return "DELETE FROM " + tableName + " USING " + tableNameUsing + " WHERE " + strWhere, nil
 }
+func (p *ParseContext) extractAllTableInfo(expr sqlparser.SQLNode) []sqlparser.SQLNode {
+	//fmt.Println(reflect.TypeOf(expr))
+	if fx, ok := expr.(*sqlparser.JoinTableExpr); ok {
+
+		a := p.extractAllTableInfo(fx.LeftExpr)
+		b := p.extractAllTableInfo(fx.RightExpr)
+		a = append(a, b...)
+		return a
+	}
+	if fx, ok := expr.(*sqlparser.AliasedTableExpr); ok {
+
+		return []sqlparser.SQLNode{fx}
+	}
+	if fx, ok := expr.(sqlparser.TableExprs); ok {
+		ret := []sqlparser.SQLNode{}
+		for _, x := range fx {
+			ret = append(ret, p.extractAllTableInfo(x)...)
+		}
+
+		return ret
+	}
+	return []sqlparser.SQLNode{}
+
+}
 func (w Compiler) walkOnJoinTable(expr *sqlparser.JoinTableExpr, ctx *ParseContext) (string, error) {
+	tblAlias := ctx.extractAllTableInfo(expr)
+	ctx.SqlNodes = tblAlias
+
+	ctx.SqlNodes = append(ctx.SqlNodes, tblAlias...)
 	strLeft, err := w.walkSQLNode(expr.LeftExpr, ctx)
 	if err != nil {
 		return "", err
@@ -813,15 +1029,15 @@ func (w Compiler) walkOnJoinTable(expr *sqlparser.JoinTableExpr, ctx *ParseConte
 	if err != nil {
 		return "", err
 	}
-	var leftExpr *sqlparser.AliasedTableExpr = nil
-	var rightExpr *sqlparser.AliasedTableExpr = nil
-	if l, ok := expr.LeftExpr.(*sqlparser.AliasedTableExpr); ok && !l.As.IsEmpty() {
-		leftExpr = l
-	}
-	if r, ok := expr.RightExpr.(*sqlparser.AliasedTableExpr); ok {
-		rightExpr = r
-	}
-	ctx.SqlNodes = []sqlparser.SQLNode{leftExpr, rightExpr}
+	// var leftExpr *sqlparser.AliasedTableExpr = nil
+	// var rightExpr *sqlparser.AliasedTableExpr = nil
+	// if l, ok := expr.LeftExpr.(*sqlparser.AliasedTableExpr); ok && !l.As.IsEmpty() {
+	// 	leftExpr = l
+	// }
+	// if r, ok := expr.RightExpr.(*sqlparser.AliasedTableExpr); ok {
+	// 	rightExpr = r
+	// }
+	// ctx.SqlNodes = []sqlparser.SQLNode{leftExpr, rightExpr}
 
 	strConditional, err := w.walkSQLNode(expr.Condition, ctx)
 
@@ -898,19 +1114,35 @@ func (w Compiler) walkOnTable(expr sqlparser.TableExprs, ctx *ParseContext) (str
 	ret := []string{}
 	for _, expr := range expr {
 		if tbl, ok := expr.(*sqlparser.AliasedTableExpr); ok {
-
-			strTableName, err := w.walkSQLNode(tbl.Expr, ctx)
-			ctx.SqlNodes = append(ctx.SqlNodes, tbl.Expr)
-			if err != nil {
-				return "", err
-			}
-
-			if !tbl.As.IsEmpty() {
-				n, err := w.OnParse(Node{Nt: Alias, V: tbl.As.String()})
+			var strTableName = ""
+			if tbl.As.IsEmpty() {
+				_strTableName, err := w.walkSQLNode(tbl.Expr, ctx)
 				if err != nil {
 					return "", err
 				}
-				strTableName = strTableName + " AS " + n.V
+				// n, err := w.OnParse(Node{Nt: Alias, V: tbl.As.String()})
+				// if err != nil {
+				// 	return "", err
+				// }
+				// _strTableName = _strTableName
+				strTableName = _strTableName
+			} else {
+				_strTableName, err := w.walkSQLNode(tbl.Expr, ctx)
+				if err != nil {
+					return "", err
+				}
+
+				_strAs, err := w.walkSQLNode(tbl.As, ctx)
+				if err != nil {
+					return "", err
+				}
+				ctx.SqlNodes = append(ctx.SqlNodes, tbl.As)
+				// n, err := w.OnParse(Node{Nt: Alias, V: tbl.As.String()})
+				// if err != nil {
+				// 	return "", err
+				// }
+				_strTableName = _strTableName + " AS " + w.Quote.Quote(_strAs)
+				strTableName = _strTableName
 			}
 
 			ret = append(ret, strTableName)
@@ -944,7 +1176,109 @@ func (w Compiler) walkOnFuncExpr(expr *sqlparser.FuncExpr, ctx *ParseContext) (s
 	}
 	return n.V + "(" + strings.Join(params, ", ") + ")", nil
 }
+func (ctx *ParseContext) findTableByAlias(alias string) string {
+	cGroup := ctx.groupWithAs()
+	if ret, okL := cGroup[alias]; okL {
+		return ret
+	}
+	for _, x := range ctx.SqlNodes {
+		if fx, ok := x.(*sqlparser.AliasedTableExpr); ok {
+			if fx.As.String() == alias {
+				if tblIdent, ok := fx.Expr.(*sqlparser.TableName); ok {
+					return tblIdent.Name.String()
+				}
+			}
+		}
+	}
+	return ""
+}
 func (w Compiler) walkOnColName(expr *sqlparser.ColName, ctx *ParseContext) (string, error) {
+	qualifierField := ""
+	if !expr.Qualifier.IsEmpty() {
+		oldNodes := ctx.SqlNodes
+		ctx.SqlNodes = []sqlparser.SQLNode{}
+		_tblName, err := w.walkSQLNode(expr.Qualifier, ctx)
+		if err != nil {
+			return "", err
+		}
+		ctx.SqlNodes = oldNodes
+
+		// fmt.Println(len(ctx.SqlNodes))
+		_tblName = w.Quote.UnQuote(_tblName)
+		if err != nil {
+			return "", err
+		}
+		qualifierField = _tblName
+	}
+
+	// find real table name in gGroup
+	gGroup := ctx.groupWithAs()
+	if tableName, ok := gGroup[qualifierField]; ok {
+		n, err := w.OnParse(Node{Nt: Field, V: tableName + "." + expr.Name.String()})
+		if err != nil {
+			return "", err
+		}
+		dbFieldName := strings.Split(n.V, ".")[1]
+		return w.Quote.Quote(qualifierField) + "." + dbFieldName, nil
+	} else {
+		if len(gGroup) == 1 && qualifierField == "" {
+			for as, v := range gGroup {
+
+				n, err := w.OnParse(Node{Nt: Field, V: v + "." + expr.Name.String()})
+				if err != nil {
+					return "", err
+				}
+				if strings.Contains(n.V, ".") {
+					fieldName := strings.Split(n.V, ".")[1]
+					tblName := ctx.Owner.Quote.UnQuote(strings.Split(n.V, ".")[0])
+					if !strings.EqualFold(tblName, as) {
+						return w.Quote.Quote(as) + "." + fieldName, nil
+					}
+				}
+				return n.V, nil
+
+			}
+
+		} else if qualifierField == "" {
+			if len(ctx.SqlNodes) == 1 { // select only one table and no qualifier
+				sqlNode := ctx.SqlNodes[0]
+				// fmt.Println(reflect.TypeOf(sqlNode))
+				if tblIdent, ok := sqlNode.(sqlparser.TableName); ok {
+					tableName := tblIdent.Name.String()
+					// fmt.Println(len(ctx.SqlNodes))
+
+					tableName = w.Quote.UnQuote(tableName)
+					n, err := w.OnParse(Node{Nt: Field, V: tableName + "." + expr.Name.String()})
+					if err != nil {
+						return "", err
+					}
+					return n.V, nil
+				}
+
+			}
+
+			n, err := w.OnParse(Node{Nt: Field, V: expr.Name.String()})
+			if err != nil {
+				return "", err
+			}
+			return n.V, nil
+		} else {
+			// tblName := ctx.findTableByAlias(qualifierField)
+			// fmt.Println(tblName)
+			n, err := w.OnParse(Node{Nt: Field, V: qualifierField + "." + expr.Name.String()})
+			if err != nil {
+				return "", err
+			}
+			return n.V, nil
+		}
+
+	}
+	panic("Error syntax")
+
+}
+
+func (w Compiler) walkOnColName_Delete(expr *sqlparser.ColName, ctx *ParseContext) (string, error) {
+
 	for _, x := range ctx.SqlNodes {
 		if !expr.Qualifier.IsEmpty() {
 			if fx, ok := x.(*sqlparser.AliasedTableExpr); ok {
@@ -963,6 +1297,16 @@ func (w Compiler) walkOnColName(expr *sqlparser.ColName, ctx *ParseContext) (str
 				n, err := w.OnParse(Node{Nt: Field, V: returnFieldName})
 				if err != nil {
 					return "", err
+				}
+				if len(ctx.SqlNodes) == 2 {
+					asExpr := ctx.SqlNodes[1]
+					if fxTableIdent, ok := asExpr.(sqlparser.TableIdent); ok {
+						if strings.Contains(n.V, ".") {
+							fieldName := strings.Split(n.V, ".")[1]
+							return w.Quote.Quote(fxTableIdent.String()) + "." + fieldName, nil
+						}
+					}
+
 				}
 				return n.V, nil
 
@@ -1197,4 +1541,45 @@ func (w Compiler) LoadDbDictionary(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// SplitInsertSelect splits an SQL string of the form INSERT ... SELECT into two parts
+func splitInsertSelect(sql string) (insertPart, selectPart string, err error) {
+	// Normalize string
+	sql = strings.TrimSpace(sql)
+	if sql == "" {
+		return "", "", fmt.Errorf("empty SQL string")
+	}
+
+	// Find SELECT keyword outside string literals
+	upperSQL := strings.ToUpper(sql)
+	index := -1
+	inQuotes := false
+	for i, r := range upperSQL {
+		if r == '\'' {
+			inQuotes = !inQuotes
+		}
+		if !inQuotes && i+6 <= len(upperSQL) && upperSQL[i:i+6] == "SELECT" {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return "", "", fmt.Errorf("SELECT keyword not found outside string literals")
+	}
+
+	// Split string
+	insertPart = strings.TrimSpace(sql[:index])
+	selectPart = strings.TrimSpace(sql[index:])
+	if !strings.HasPrefix(strings.ToUpper(insertPart), "INSERT") {
+		return "", "", fmt.Errorf("first part is not an INSERT statement")
+	}
+
+	// Check syntax
+	_, err = sqlparser.Parse(sql)
+	if err != nil {
+		fmt.Printf("Warning: Invalid SQL, but still split: %v\n", err)
+	}
+
+	return insertPart, selectPart, nil
 }

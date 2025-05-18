@@ -12,7 +12,9 @@ type IExecutor interface {
 	CreateInsertCommand(entity interface{}, tableInfo TableInfo) (*SqlWithParams, error)
 	CreatePostgresDbIfNotExist(ctx *sql.DB, dbName string, tenantDns string) error
 	GetTableInfoFormDb(ctx *sql.DB, dbName string) (*TableMapping, error)
+	CreateSqlMigrate(table TableInfo) []string
 }
+
 type TableInfo struct {
 	TableName              string
 	ColInfos               []ColInfo
