@@ -10,7 +10,7 @@ type Departments struct {
 	Id          int         `db:"pk;df:auto"`
 	Code        string      `db:"nvarchar(50);unique"`
 	Name        string      `db:"nvarchar(50);idx"`
-	ManagerId   int         `db:"fk(Employees.EmployeeId)"`
+	ManagerId   *int        `db:"fk(Employees.EmployeeId)"`
 	Emps        []Employees `db:"fk:DepartmentId"`
 	ParentId    *int        `db:"fk(Departments.DepartmentId)"`
 	CreatedOn   time.Time   `db:"df:now();idx"`
